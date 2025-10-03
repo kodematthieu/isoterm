@@ -22,8 +22,11 @@ pub struct Tool {
     pub name: &'static str,
     /// The GitHub repository in "owner/repo" format.
     pub repo: &'static str,
-    /// The name of the executable file inside the archive.
+    /// The name of the executable file.
     pub binary_name: &'static str,
+    /// For full archives, the relative path to the executable within the extracted files.
+    /// If None, the tool is a single binary extracted directly.
+    pub path_in_archive: Option<&'static str>,
 }
 
 /// The main provisioning function for a single tool.
@@ -72,8 +75,8 @@ pub fn provision_tool(env_dir: &Path, tool: &Tool) -> AppResult<()> {
     }
 
     tracing::info!(tool = tool.name, "Tool not found on system. Downloading...");
-    if tool.name == "fish" {
-        download_and_install_fish(env_dir, tool)
+    if tool.path_in_archive.is_some() {
+        download_and_install_archive(env_dir, tool)
     } else {
         download_and_install_binary(env_dir, tool)
     }
@@ -115,46 +118,52 @@ fn download_and_install_binary(env_dir: &Path, tool: &Tool) -> AppResult<()> {
 }
 
 #[tracing::instrument(skip(env_dir, tool))]
-fn download_and_install_fish(env_dir: &Path, tool: &Tool) -> AppResult<()> {
-    let (download_url, _asset_name) = find_github_release_asset_url(tool)?;
-    tracing::info!(url = %download_url, "Downloading fish");
+fn download_and_install_archive(env_dir: &Path, tool: &Tool) -> AppResult<()> {
+    let (download_url, asset_name) = find_github_release_asset_url(tool)?;
+    tracing::info!(url = %download_url, "Downloading archive for {}", tool.name);
 
     let response = reqwest::blocking::get(&download_url)
-        .context("Failed to download fish asset")?
+        .context("Failed to download asset")?
         .bytes()
         .context("Failed to read response bytes")?;
 
-    let fish_runtime_dir = env_dir.join("fish_runtime");
-    fs::create_dir_all(&fish_runtime_dir).context("Failed to create fish_runtime directory")?;
+    let tool_dir = if tool.name == "fish" {
+        env_dir.join("fish_runtime")
+    } else {
+        env_dir.join(tool.name)
+    };
+    fs::create_dir_all(&tool_dir).with_context(|| format!("Failed to create directory for {}", tool.name))?;
 
-    let tar = XzDecoder::new(&response[..]);
-    let mut archive = Archive::new(tar);
-
-    // Extract entire archive into fish_runtime_dir, stripping the top-level component
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?;
-        if let Some(path_stripped) = path.strip_prefix(path.components().next().unwrap()).ok() {
-            if !path_stripped.as_os_str().is_empty() {
-                entry.unpack(fish_runtime_dir.join(path_stripped))?;
-            }
-        }
+    if asset_name.ends_with(".tar.gz") {
+        let tar = GzDecoder::new(&response[..]);
+        let mut archive = Archive::new(tar);
+        extract_archive(&mut archive, &tool_dir)?;
+    } else if asset_name.ends_with(".tar.xz") {
+        let tar = XzDecoder::new(&response[..]);
+        let mut archive = Archive::new(tar);
+        extract_archive(&mut archive, &tool_dir)?;
+    } else if asset_name.ends_with(".zip") {
+        let cursor = Cursor::new(response);
+        let mut zip = ZipArchive::new(cursor)?;
+        extract_zip_archive(&mut zip, &tool_dir)?;
+    } else {
+        return Err(anyhow!("Unsupported archive format: {}", asset_name));
     }
 
-    // Create symlink
-    let fish_binary_in_runtime = fish_runtime_dir.join("bin").join("fish");
-    let fish_binary_in_env = env_dir.join("bin").join("fish");
 
-    if !fish_binary_in_runtime.exists() {
+    let binary_path_in_archive = tool_dir.join(tool.path_in_archive.unwrap());
+    let binary_path_in_env = env_dir.join("bin").join(tool.binary_name);
+
+    if !binary_path_in_archive.exists() {
         return Err(anyhow!(
-            "Could not find fish binary in extracted archive at {}",
-            fish_binary_in_runtime.display()
+            "Could not find binary in extracted archive at {}",
+            binary_path_in_archive.display()
         ));
     }
 
-    create_symlink(&fish_binary_in_runtime, &fish_binary_in_env)?;
+    create_symlink(&binary_path_in_archive, &binary_path_in_env)?;
 
-    tracing::info!("Successfully installed fish.");
+    tracing::info!("Successfully installed {}.", tool.name);
     Ok(())
 }
 
@@ -178,29 +187,33 @@ fn find_github_release_asset_url(tool: &Tool) -> AppResult<(String, String)> {
 
     let arch = env::consts::ARCH;
     let os_str = match env::consts::OS {
-        "linux" => {
-            if tool.name == "zoxide" {
-                "unknown-linux-musl"
-            } else {
-                "unknown-linux-gnu"
-            }
-        }
+        "linux" => match tool.name {
+            "fish" | "helix" => "linux",
+            "zoxide" => "unknown-linux-musl",
+            _ => "unknown-linux-gnu",
+        },
         "macos" => "apple-darwin",
         "windows" => "pc-windows-msvc",
         _ => return Err(anyhow!("Unsupported OS: {}", env::consts::OS)),
     };
     let ext = if env::consts::OS == "windows" {
         "zip"
-    } else if tool.name == "fish" {
-        "tar.xz"
+    } else if tool.name == "fish" || tool.name == "helix" {
+        match (tool.name, env::consts::OS) {
+            ("helix", "linux") => "tar.xz",
+            ("helix", "macos") => "zip",
+            ("fish", _) => "tar.xz",
+            _ => "tar.gz",
+        }
     } else {
         "tar.gz"
     };
 
-    // The asset name contains fragments for the tool name, architecture, OS, and extension.
-    // We build a list of fragments to search for in the asset names.
-    // E.g., for starship on linux: ["starship", "x86_64", "unknown-linux-gnu", "tar.gz"]
-    let fragments_to_use = vec![tool.name, arch, os_str, ext];
+    let mut fragments_to_use = vec![arch, os_str, ext];
+    if tool.name != "ripgrep" {
+        fragments_to_use.insert(0, tool.name);
+    }
+
 
     for asset in assets {
         let name = asset["name"].as_str().unwrap_or("");
@@ -244,6 +257,71 @@ fn extract_tar_gz(bytes: &[u8], target_dir: &Path, binary_name: &str) -> AppResu
         "Could not find '{}' in the downloaded .tar.gz archive.",
         binary_name
     ))
+}
+
+fn extract_archive<R: io::Read>(archive: &mut Archive<R>, target_dir: &Path) -> AppResult<()> {
+    for entry_result in archive.entries()? {
+        let mut entry = entry_result?;
+        let path = entry.path()?.to_path_buf();
+
+        let (outpath, is_dir) = if path.components().count() == 1 {
+            (target_dir.join(path.file_name().unwrap()), entry.header().entry_type().is_dir())
+        } else {
+            let stripped_path = path.strip_prefix(path.components().next().unwrap()).unwrap();
+            (target_dir.join(stripped_path), entry.header().entry_type().is_dir())
+        };
+
+        if is_dir {
+            fs::create_dir_all(&outpath)?;
+        } else {
+            if let Some(p) = outpath.parent() {
+                if !p.exists() {
+                    fs::create_dir_all(p)?;
+                }
+            }
+            entry.unpack(&outpath)?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_zip_archive<R: io::Read + io::Seek>(
+    archive: &mut ZipArchive<R>,
+    target_dir: &Path,
+) -> AppResult<()> {
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        let outpath = match file.enclosed_name() {
+            Some(path) => path.to_owned(),
+            None => continue,
+        };
+
+        let outpath_stripped = match outpath.strip_prefix(outpath.components().next().unwrap()) {
+            Ok(p) if !p.as_os_str().is_empty() => target_dir.join(p),
+            _ => continue,
+        };
+
+        if file.name().ends_with('/') {
+            fs::create_dir_all(&outpath_stripped)?;
+        } else {
+            if let Some(p) = outpath_stripped.parent() {
+                if !p.exists() {
+                    fs::create_dir_all(p)?;
+                }
+            }
+            let mut outfile = fs::File::create(&outpath_stripped)?;
+            io::copy(&mut file, &mut outfile)?;
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Some(mode) = file.unix_mode() {
+                fs::set_permissions(&outpath_stripped, fs::Permissions::from_mode(mode))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tracing::instrument(skip(bytes))]

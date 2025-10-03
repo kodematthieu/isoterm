@@ -45,21 +45,37 @@ fn run() -> AppResult<()> {
             name: "fish",
             repo: "fish-shell/fish-shell",
             binary_name: "fish",
+            path_in_archive: Some("bin/fish"),
         },
         Tool {
             name: "starship",
             repo: "starship/starship",
             binary_name: "starship",
+            path_in_archive: None,
         },
         Tool {
             name: "zoxide",
             repo: "ajeetdsouza/zoxide",
             binary_name: "zoxide",
+            path_in_archive: None,
         },
         Tool {
             name: "atuin",
             repo: "atuinsh/atuin",
             binary_name: "atuin",
+            path_in_archive: None,
+        },
+        Tool {
+            name: "ripgrep",
+            repo: "BurntSushi/ripgrep",
+            binary_name: "rg",
+            path_in_archive: None,
+        },
+        Tool {
+            name: "helix",
+            repo: "helix-editor/helix",
+            binary_name: "hx",
+            path_in_archive: Some("hx"), // The extraction logic will strip the top-level dir
         },
     ];
 

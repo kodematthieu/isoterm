@@ -21,6 +21,9 @@ pub fn generate_configs(env_dir: &Path) -> AppResult<()> {
     // Generate atuin config
     write_atuin_config(env_dir)?;
 
+    // Generate helix config
+    write_helix_config(env_dir)?;
+
     tracing::info!("All configuration files generated successfully.");
     Ok(())
 }
@@ -39,6 +42,7 @@ export PATH="$ENV_DIR/bin:$PATH"
 # Set environment variables to use our private configs
 export STARSHIP_CONFIG="$ENV_DIR/config/starship.toml"
 export ATUIN_CONFIG_DIR="$ENV_DIR/config/atuin"
+export HELIX_CONFIG="$ENV_DIR/config/helix/config.toml"
 
 # Set environment variable to tell fish where its runtime files are
 export FISH_HOME="$ENV_DIR/fish_runtime"
@@ -68,14 +72,16 @@ fn write_fish_config(env_dir: &Path) -> AppResult<()> {
     let fish_config_dir = env_dir.join("config").join("fish");
     fs::create_dir_all(&fish_config_dir).context("Failed to create fish config directory")?;
 
-    let config_content = r#"# Starship prompt
-starship init fish | source
+    let config_content = r#"if status is-interactive
+    # Starship prompt
+    starship init fish | source
 
-# Atuin shell history
-atuin init fish | source
+    # Atuin shell history
+    atuin init fish | source
 
-# Zoxide directory jumper
-zoxide init fish | source
+    # Zoxide directory jumper
+    zoxide init fish | source
+end
 
 # Welcome message
 echo "Welcome to your isolated shell environment!"
@@ -122,5 +128,84 @@ sync_frequency = "5m"
 sync_address = "https://api.atuin.sh"
 "#;
     fs::write(config_path, config_content).context("Failed to write atuin/config.toml")?;
+    Ok(())
+}
+
+#[tracing::instrument(skip(env_dir))]
+fn write_helix_config(env_dir: &Path) -> AppResult<()> {
+    let helix_config_dir = env_dir.join("config").join("helix");
+    fs::create_dir_all(&helix_config_dir).context("Failed to create helix config directory")?;
+
+    let config_toml_path = helix_config_dir.join("config.toml");
+    let config_toml_content = r#"
+theme = "tokyonight_moon"
+
+[editor]
+cursorline = true
+cursorcolumn = true
+bufferline = "multiple"
+end-of-line-diagnostics = "hint"
+
+[editor.file-picker]
+git-ignore = true
+
+[editor.cursor-shape]
+insert = "bar"
+normal = "block"
+select = "underline"
+
+[editor.auto-save]
+after-delay.enable = true
+after-delay.timeout = 5000
+
+[editor.whitespace.render]
+space = "all"
+tab = "all"
+newline = "all"
+
+[editor.whitespace.characters]
+tab = "⇥"
+tabpad = "✶"
+
+[editor.indent-guides]
+render = true
+character = "╎"
+
+[editor.soft-wrap]
+enable = true
+
+[editor.smart-tab]
+supersede-menu = true
+
+[editor.inline-diagnostics]
+cursor-line = "error"
+
+[keys.normal]
+C-A-left = ":bp"
+C-A-right = ":bn"
+"#;
+    fs::write(config_toml_path, config_toml_content).context("Failed to write helix/config.toml")?;
+
+    let languages_toml_path = helix_config_dir.join("languages.toml");
+    let languages_toml_content = r#"
+[[language]]
+name = "python"
+auto-format = true
+
+[[language]]
+name = "cpp"
+auto-format = true
+formatter = { command = "clang-format" }
+
+[[language]]
+name = "typescript"
+scope = "source.ts"
+roots = ["package.json", "tsconfig.json"]
+language-servers = ["typescript-language-server"]
+formatter = { command = "prettier", args = ["--stdin-filepath", "{file}"] }
+"#;
+    fs::write(languages_toml_path, languages_toml_content)
+        .context("Failed to write helix/languages.toml")?;
+
     Ok(())
 }
