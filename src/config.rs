@@ -112,22 +112,35 @@ error_symbol = "[➜](bold red)"
 /// Creates a default `atuin/config.toml` configuration.
 #[tracing::instrument(skip(env_dir))]
 fn write_atuin_config(env_dir: &Path) -> AppResult<()> {
-    let atuin_config_dir = env_dir.join("config").join("atuin");
-    fs::create_dir_all(&atuin_config_dir).context("Failed to create atuin config directory")?;
+    // Define the specific data directory for atuin
+    let atuin_data_dir = env_dir.join("data").join("atuin");
+    fs::create_dir_all(&atuin_data_dir).context("Failed to create atuin data directory")?;
 
-    let config_path = atuin_config_dir.join("config.toml");
-    let config_content = r#"
-# The database path for Atuin history.
-# We'll keep it inside the environment's data directory.
-db_path = "~/.local/share/atuin/history.db"
+    // Define the absolute path for the history database
+    let db_path = atuin_data_dir.join("history.db");
+    let db_path_str = db_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid non-UTF8 path for atuin database"))?;
 
-# How often to sync with the server.
+    // Create the config content with the absolute path
+    let config_content = format!(
+        r#"# The database path for Atuin history.
+# This is isolated within the environment's data directory.
+db_path = "{}"
+
 sync_frequency = "5m"
-
-# The address of the sync server.
 sync_address = "https://api.atuin.sh"
-"#;
+"#,
+        // Ensure forward slashes for cross-platform TOML compatibility
+        db_path_str.replace('\\', "/")
+    );
+
+    // Write the config file
+    let atuin_config_dir = env_dir.join("config").join("atuin");
+    fs::create_dir_all(&atuin_config_dir)?;
+    let config_path = atuin_config_dir.join("config.toml");
     fs::write(config_path, config_content).context("Failed to write atuin/config.toml")?;
+
     Ok(())
 }
 

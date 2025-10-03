@@ -34,8 +34,10 @@ fn run() -> AppResult<()> {
     // Create the main environment directory and its subdirectories.
     let bin_dir = env_dir.join("bin");
     let config_dir = env_dir.join("config");
+    let data_dir = env_dir.join("data");
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&config_dir)?;
+    fs::create_dir_all(&data_dir)?;
 
     tracing::info!("Created environment directories.");
 

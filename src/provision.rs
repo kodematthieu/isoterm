@@ -171,7 +171,7 @@ fn download_and_install_archive(env_dir: &Path, tool: &Tool) -> AppResult<()> {
 fn find_github_release_asset_url(tool: &Tool) -> AppResult<(String, String)> {
     let repo_url = format!("https://api.github.com/repos/{}/releases/latest", tool.repo);
     let client = reqwest::blocking::Client::builder()
-        .user_agent("auto-term-setup")
+        .user_agent("isoterm")
         .build()?;
 
     let response: Value = client
@@ -186,16 +186,17 @@ fn find_github_release_asset_url(tool: &Tool) -> AppResult<(String, String)> {
         .ok_or_else(|| anyhow!("No assets found in release for {}", tool.repo))?;
 
     let arch = env::consts::ARCH;
-    let os_str = match env::consts::OS {
+    let os_targets: Vec<&str> = match env::consts::OS {
         "linux" => match tool.name {
-            "fish" | "helix" => "linux",
-            "zoxide" => "unknown-linux-musl",
-            _ => "unknown-linux-gnu",
+            "fish" | "helix" => vec!["linux"],
+            // For other tools, prefer 'gnu' but fall back to 'musl'.
+            _ => vec!["unknown-linux-gnu", "unknown-linux-musl"],
         },
-        "macos" => "apple-darwin",
-        "windows" => "pc-windows-msvc",
+        "macos" => vec!["apple-darwin"],
+        "windows" => vec!["pc-windows-msvc"],
         _ => return Err(anyhow!("Unsupported OS: {}", env::consts::OS)),
     };
+
     let ext = if env::consts::OS == "windows" {
         "zip"
     } else if tool.name == "fish" || tool.name == "helix" {
@@ -209,31 +210,36 @@ fn find_github_release_asset_url(tool: &Tool) -> AppResult<(String, String)> {
         "tar.gz"
     };
 
-    let mut fragments_to_use = vec![arch, os_str, ext];
-    if tool.name != "ripgrep" {
-        fragments_to_use.insert(0, tool.name);
-    }
+    for os_target in &os_targets {
+        let mut fragments_to_use = vec![arch, *os_target, ext];
+        if tool.name != "ripgrep" {
+            fragments_to_use.insert(0, tool.name);
+        }
 
+        tracing::debug!(fragments = ?fragments_to_use, "Searching for asset");
 
-    for asset in assets {
-        let name = asset["name"].as_str().unwrap_or("");
-        let lower_name = name.to_lowercase();
+        for asset in assets {
+            let name = asset["name"].as_str().unwrap_or("");
+            let lower_name = name.to_lowercase();
 
-        if fragments_to_use
-            .iter()
-            .all(|frag| lower_name.contains(&frag.to_lowercase()))
-        {
-            let url = asset["browser_download_url"].as_str().unwrap_or("").to_string();
-            if !url.is_empty() {
-                return Ok((url, name.to_string()));
+            if fragments_to_use
+                .iter()
+                .all(|frag| lower_name.contains(&frag.to_lowercase()))
+            {
+                let url = asset["browser_download_url"].as_str().unwrap_or("").to_string();
+                if !url.is_empty() {
+                    tracing::info!(asset = name, "Found matching release asset");
+                    return Ok((url, name.to_string()));
+                }
             }
         }
     }
 
     Err(anyhow!(
-        "Could not find a matching release asset for {} with fragments: {:?}",
+        "Could not find a matching release asset for {} on {} {}",
         tool.name,
-        fragments_to_use
+        env::consts::OS,
+        arch
     ))
 }
 

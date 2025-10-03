@@ -1,6 +1,6 @@
-# auto-term-setup
+# isoterm
 
-`auto-term-setup` is a tool for creating isolated, non-destructive, and portable shell environments.
+`isoterm` is a tool for creating isolated, non-destructive, and portable shell environments.
 
 Instead of modifying your system's global configuration or installing software with a package manager, this tool creates a self-contained directory that includes all the necessary binaries, configuration files, and an activation script. This approach ensures that your main system remains untouched and makes cleanup as simple as deleting a single folder.
 
@@ -26,17 +26,17 @@ You can build the project from source using Cargo:
 ```sh
 cargo build --release
 ```
-The binary will be located at `target/release/auto-term-setup`.
+The binary will be located at `target/release/isoterm`.
 
 ### 2. Create an Environment
 Run the executable. You can optionally provide a path where the environment directory will be created. If you don't provide a path, it will default to `~/.local_shell`.
 
 ```sh
 # Create an environment in the default location
-./target/release/auto-term-setup
+./target/release/isoterm
 
 # Or, create an environment in a specific directory
-./target/release/auto-term-setup ./my-temp-env
+./target/release/isoterm ./my-temp-env
 ```
 
 The tool will print its progress as it provisions each tool and generates the necessary configuration files.
