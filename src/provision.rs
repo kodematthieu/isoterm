@@ -29,8 +29,13 @@ pub struct Tool {
 }
 
 /// Main provisioning function for a single tool.
-#[tracing::instrument(skip(env_dir, tool, pb))]
-pub async fn provision_tool(env_dir: &Path, tool: &Tool, pb: &ProgressBar) -> AppResult<()> {
+#[tracing::instrument(skip(env_dir, tool, pb, spinner_style))]
+pub async fn provision_tool(
+    env_dir: &Path,
+    tool: &Tool,
+    pb: &ProgressBar,
+    spinner_style: &ProgressStyle,
+) -> AppResult<()> {
     pb.set_message(format!("Provisioning {}...", style(tool.name).bold()));
 
     let bin_dir = env_dir.join("bin");
@@ -62,9 +67,9 @@ pub async fn provision_tool(env_dir: &Path, tool: &Tool, pb: &ProgressBar) -> Ap
     }
 
     let download_result = if tool.path_in_archive.is_some() {
-        download_and_install_archive(env_dir, tool, pb).await
+        download_and_install_archive(env_dir, tool, pb, spinner_style).await
     } else {
-        download_and_install_binary(env_dir, tool, pb).await
+        download_and_install_binary(env_dir, tool, pb, spinner_style).await
     };
 
     if let Err(e) = download_result {
@@ -106,15 +111,20 @@ async fn download_to_temp_file(
         pb.inc(chunk.len() as u64);
     }
 
-    pb.finish_and_clear();
     Ok(temp_file)
 }
 
-#[tracing::instrument(skip(env_dir, tool, pb))]
-async fn download_and_install_binary(env_dir: &Path, tool: &Tool, pb: &ProgressBar) -> AppResult<()> {
+#[tracing::instrument(skip(env_dir, tool, pb, spinner_style))]
+async fn download_and_install_binary(
+    env_dir: &Path,
+    tool: &Tool,
+    pb: &ProgressBar,
+    spinner_style: &ProgressStyle,
+) -> AppResult<()> {
     let (download_url, asset_name) = find_github_release_asset_url(tool).await?;
     let temp_file = download_to_temp_file(&download_url, &asset_name, pb).await?;
 
+    pb.set_style(spinner_style.clone());
     pb.set_message(format!(
         "Extracting {}...",
         style(tool.binary_name).bold()
@@ -146,16 +156,18 @@ async fn download_and_install_binary(env_dir: &Path, tool: &Tool, pb: &ProgressB
     Ok(())
 }
 
-#[tracing::instrument(skip(env_dir, tool, pb))]
+#[tracing::instrument(skip(env_dir, tool, pb, spinner_style))]
 async fn download_and_install_archive(
     env_dir: &Path,
     tool: &Tool,
     pb: &ProgressBar,
+    spinner_style: &ProgressStyle,
 ) -> AppResult<()> {
     let (download_url, asset_name) = find_github_release_asset_url(tool).await?;
     let temp_file = download_to_temp_file(&download_url, &asset_name, pb).await?;
     let file = temp_file.reopen()?;
 
+    pb.set_style(spinner_style.clone());
     pb.set_message(format!("Extracting archive for {}...", style(tool.name).bold()));
 
     let tool_dir = if tool.name == "fish" {

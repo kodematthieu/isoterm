@@ -105,7 +105,7 @@ async fn run() -> AppResult<()> {
         let pb = mp.add(ProgressBar::new_spinner());
         pb.enable_steady_tick(Duration::from_millis(120));
         pb.set_style(spinner_style.clone());
-        provision_tool(&env_dir, tool, &pb).await?;
+        provision_tool(&env_dir, tool, &pb, &spinner_style).await?;
     }
 
     // --- Configuration Step ---

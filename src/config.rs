@@ -40,12 +40,12 @@ pub async fn generate_configs(env_dir: &Path, pb: &ProgressBar) -> AppResult<()>
 fn write_activate_script(env_dir: &Path) -> AppResult<()> {
     let script_content = r#"#!/bin/sh
 ENV_DIR=$(cd "$(dirname "$0")" && pwd)
-export PATH="$ENV_DIR/bin:$PATH"
-export STARSHIP_CONFIG="$ENV_DIR/config/starship.toml"
-export ATUIN_CONFIG_DIR="$ENV_DIR/config/atuin"
-export HELIX_CONFIG="$ENV_DIR/config/helix/config.toml"
-export FISH_HOME="$ENV_DIR/fish_runtime"
-exec "$ENV_DIR/bin/fish" -l -C "source '$ENV_DIR/config/fish/config.fish'"
+PATH="$ENV_DIR/bin:$PATH" \
+STARSHIP_CONFIG="$ENV_DIR/config/starship.toml" \
+ATUIN_CONFIG_DIR="$ENV_DIR/config/atuin" \
+HELIX_CONFIG="$ENV_DIR/config/helix/config.toml" \
+FISH_HOME="$ENV_DIR/fish_runtime" \
+"$ENV_DIR/bin/fish" -l -C "source '$ENV_DIR/config/fish/config.fish'"
 "#;
 
     let script_path = env_dir.join("activate.sh");
@@ -71,8 +71,10 @@ fn write_fish_config(env_dir: &Path) -> AppResult<()> {
     atuin init fish | source
     zoxide init fish | source
 end
-echo "Welcome to your isolated shell environment!"
-echo "Type 'exit' to return to your regular shell."
+
+function on_exit --on-event fish_exit
+    echo "Exiting isolated shell environment."
+end
 "#;
 
     let config_path = fish_config_dir.join("config.fish");
