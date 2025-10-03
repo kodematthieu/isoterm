@@ -16,6 +16,7 @@ use std::os::unix::fs::symlink;
 use std::os::windows::fs::{symlink_dir, symlink_file};
 
 /// Represents a tool to be provisioned.
+#[derive(Debug)]
 pub struct Tool {
     /// The name of the command, e.g., "fish", "starship".
     pub name: &'static str,
@@ -26,31 +27,32 @@ pub struct Tool {
 }
 
 /// The main provisioning function for a single tool.
+#[tracing::instrument(skip(env_dir))]
 pub fn provision_tool(env_dir: &Path, tool: &Tool) -> AppResult<()> {
     let bin_dir = env_dir.join("bin");
     let tool_path_in_env = bin_dir.join(tool.binary_name);
 
     if tool_path_in_env.exists() {
-        println!("✅ {} is already provisioned.", tool.name);
+        tracing::info!(tool = tool.name, "Tool is already provisioned.");
         return Ok(());
     }
 
     if let Ok(system_path) = which::which(tool.binary_name) {
-        println!(
-            "Found system-installed {} at: {}",
-            tool.name,
-            system_path.display()
+        tracing::info!(
+            tool = tool.name,
+            path = %system_path.display(),
+            "Found system-installed tool"
         );
         if create_symlink(&system_path, &tool_path_in_env).is_ok() {
-            println!("🔗 Symlinked existing {} to environment.", tool.name);
+            tracing::info!(tool = tool.name, "Symlinked existing tool to environment.");
             return Ok(());
         }
-        println!(
-            "⚠️ Symlink failed for {}. Falling back to copying.",
-            tool.name
+        tracing::warn!(
+            tool = tool.name,
+            "Symlink failed. Falling back to copying."
         );
         if fs::copy(&system_path, &tool_path_in_env).is_ok() {
-            println!("📋 Copied existing {} to environment.", tool.name);
+            tracing::info!(tool = tool.name, "Copied existing tool to environment.");
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -63,13 +65,13 @@ pub fn provision_tool(env_dir: &Path, tool: &Tool) -> AppResult<()> {
             }
             return Ok(());
         }
-        println!(
-            "❌ Failed to symlink or copy existing {}. Proceeding to download.",
-            tool.name
+        tracing::warn!(
+            tool = tool.name,
+            "Failed to symlink or copy existing tool. Proceeding to download."
         );
     }
 
-    println!("⬇️ {} not found on system. Downloading...", tool.name);
+    tracing::info!(tool = tool.name, "Tool not found on system. Downloading...");
     if tool.name == "fish" {
         download_and_install_fish(env_dir, tool)
     } else {
@@ -77,9 +79,10 @@ pub fn provision_tool(env_dir: &Path, tool: &Tool) -> AppResult<()> {
     }
 }
 
+#[tracing::instrument(skip(env_dir, tool))]
 fn download_and_install_binary(env_dir: &Path, tool: &Tool) -> AppResult<()> {
     let (download_url, asset_name) = find_github_release_asset_url(tool)?;
-    println!("Downloading from {}", download_url);
+    tracing::info!(url = %download_url, "Downloading asset");
 
     let response = reqwest::blocking::get(download_url)
         .context("Failed to download asset")?
@@ -103,17 +106,18 @@ fn download_and_install_binary(env_dir: &Path, tool: &Tool) -> AppResult<()> {
         fs::set_permissions(&tool_path, fs::Permissions::from_mode(0o755))?;
     }
 
-    println!(
-        "✅ Successfully installed {} to {}",
-        tool.name,
-        tool_path.display()
+    tracing::info!(
+        tool = tool.name,
+        path = %tool_path.display(),
+        "Successfully installed tool"
     );
     Ok(())
 }
 
+#[tracing::instrument(skip(env_dir, tool))]
 fn download_and_install_fish(env_dir: &Path, tool: &Tool) -> AppResult<()> {
     let (download_url, _asset_name) = find_github_release_asset_url(tool)?;
-    println!("Downloading fish from {}", download_url);
+    tracing::info!(url = %download_url, "Downloading fish");
 
     let response = reqwest::blocking::get(&download_url)
         .context("Failed to download fish asset")?
@@ -150,10 +154,11 @@ fn download_and_install_fish(env_dir: &Path, tool: &Tool) -> AppResult<()> {
 
     create_symlink(&fish_binary_in_runtime, &fish_binary_in_env)?;
 
-    println!("✅ Successfully installed fish.");
+    tracing::info!("Successfully installed fish.");
     Ok(())
 }
 
+#[tracing::instrument]
 fn find_github_release_asset_url(tool: &Tool) -> AppResult<(String, String)> {
     let repo_url = format!("https://api.github.com/repos/{}/releases/latest", tool.repo);
     let client = reqwest::blocking::Client::builder()
@@ -219,6 +224,7 @@ fn find_github_release_asset_url(tool: &Tool) -> AppResult<(String, String)> {
     ))
 }
 
+#[tracing::instrument(skip(bytes))]
 fn extract_tar_gz(bytes: &[u8], target_dir: &Path, binary_name: &str) -> AppResult<()> {
     let tar = GzDecoder::new(bytes);
     let mut archive = Archive::new(tar);
@@ -240,6 +246,7 @@ fn extract_tar_gz(bytes: &[u8], target_dir: &Path, binary_name: &str) -> AppResu
     ))
 }
 
+#[tracing::instrument(skip(bytes))]
 fn extract_zip(bytes: &[u8], target_dir: &Path, binary_name: &str) -> AppResult<()> {
     let reader = Cursor::new(bytes);
     let mut archive = ZipArchive::new(reader)?;
@@ -270,11 +277,13 @@ fn extract_zip(bytes: &[u8], target_dir: &Path, binary_name: &str) -> AppResult<
 }
 
 #[cfg(unix)]
+#[tracing::instrument]
 fn create_symlink(original: &Path, link: &Path) -> AppResult<()> {
     symlink(original, link).context("Failed to create symlink")
 }
 
 #[cfg(windows)]
+#[tracing::instrument]
 fn create_symlink(original: &Path, link: &Path) -> AppResult<()> {
     if original.is_dir() {
         symlink_dir(original, link).context("Failed to create directory symlink")

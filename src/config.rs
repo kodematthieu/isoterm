@@ -4,6 +4,7 @@ use std::fs;
 use std::path::Path;
 
 /// Generates all necessary configuration files and the activation script.
+#[tracing::instrument(skip(env_dir))]
 pub fn generate_configs(env_dir: &Path) -> AppResult<()> {
     let config_dir = env_dir.join("config");
     fs::create_dir_all(&config_dir).context("Failed to create config directory")?;
@@ -20,19 +21,17 @@ pub fn generate_configs(env_dir: &Path) -> AppResult<()> {
     // Generate atuin config
     write_atuin_config(env_dir)?;
 
-    println!("✅ All configuration files generated successfully.");
+    tracing::info!("All configuration files generated successfully.");
     Ok(())
 }
 
 /// Creates the main `activate.sh` script for the environment.
+#[tracing::instrument(skip(env_dir))]
 fn write_activate_script(env_dir: &Path) -> AppResult<()> {
-    let script_content = format!(
-        r#"#!/bin/sh
+    let script_content = r#"#!/bin/sh
 
 # Get the absolute path to the environment directory
-# THIS_SCRIPT is: {env_dir}/activate.sh
-THIS_SCRIPT=$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || (cd "$(dirname "$0")" && pwd -P)/$(basename "$0"))
-ENV_DIR=$(dirname "$THIS_SCRIPT")
+ENV_DIR=$(cd "$(dirname "$0")" && pwd)
 
 # Prepend our private bin directory to the PATH
 export PATH="$ENV_DIR/bin:$PATH"
@@ -48,9 +47,7 @@ export FISH_HOME="$ENV_DIR/fish_runtime"
 # The '-l' flag makes it a login shell
 # The '-C' flag sets the initial command to source our config
 exec "$ENV_DIR/bin/fish" -l -C "source '$ENV_DIR/config/fish/config.fish'"
-"#,
-        env_dir = env_dir.display()
-    );
+"#;
 
     let script_path = env_dir.join("activate.sh");
     fs::write(&script_path, script_content).context("Failed to write activate.sh")?;
@@ -66,6 +63,7 @@ exec "$ENV_DIR/bin/fish" -l -C "source '$ENV_DIR/config/fish/config.fish'"
 }
 
 /// Creates the `config.fish` file with initialization commands.
+#[tracing::instrument(skip(env_dir))]
 fn write_fish_config(env_dir: &Path) -> AppResult<()> {
     let fish_config_dir = env_dir.join("config").join("fish");
     fs::create_dir_all(&fish_config_dir).context("Failed to create fish config directory")?;
@@ -90,6 +88,7 @@ echo "Type 'exit' to return to your regular shell."
 }
 
 /// Creates a default `starship.toml` configuration.
+#[tracing::instrument(skip(env_dir))]
 fn write_starship_config(env_dir: &Path) -> AppResult<()> {
     let config_path = env_dir.join("config").join("starship.toml");
     let config_content = r#"
@@ -105,6 +104,7 @@ error_symbol = "[➜](bold red)"
 }
 
 /// Creates a default `atuin/config.toml` configuration.
+#[tracing::instrument(skip(env_dir))]
 fn write_atuin_config(env_dir: &Path) -> AppResult<()> {
     let atuin_config_dir = env_dir.join("config").join("atuin");
     fs::create_dir_all(&atuin_config_dir).context("Failed to create atuin config directory")?;

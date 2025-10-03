@@ -13,19 +13,23 @@ use std::process::exit;
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("❌ Error: {:?}", e);
+        tracing::error!(error = ?e, "Application failed");
         exit(1);
     }
 }
 
+#[tracing::instrument]
 fn run() -> AppResult<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
     let cli = Cli::parse();
 
     // Expand the user-provided path (e.g., `~` to the home directory).
     let dest_dir_str = shellexpand::tilde(&cli.dest_dir).to_string();
     let env_dir = PathBuf::from(dest_dir_str);
 
-    println!("Setting up environment in: {}", env_dir.display());
+    tracing::info!(path = %env_dir.display(), "Setting up environment");
 
     // Create the main environment directory and its subdirectories.
     let bin_dir = env_dir.join("bin");
@@ -33,7 +37,7 @@ fn run() -> AppResult<()> {
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&config_dir)?;
 
-    println!("✅ Created environment directories.");
+    tracing::info!("Created environment directories.");
 
     // Define the list of tools to be provisioned.
     let tools = vec![
@@ -67,9 +71,9 @@ fn run() -> AppResult<()> {
     // Generate all configuration files.
     config::generate_configs(&env_dir)?;
 
-    println!("\n🚀 Environment setup complete!");
-    println!("To activate your new shell environment, run:");
-    println!("\n  source {}\n", env_dir.join("activate.sh").display());
+    tracing::info!("\n🚀 Environment setup complete!");
+    tracing::info!("To activate your new shell environment, run:");
+    tracing::info!("\n  source {}\n", env_dir.join("activate.sh").display());
 
     Ok(())
 }
