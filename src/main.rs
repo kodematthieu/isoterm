@@ -7,39 +7,58 @@ use crate::cli::Cli;
 use crate::error::AppResult;
 use crate::provision::{provision_tool, Tool};
 use clap::Parser;
+use console::style;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fs;
 use std::path::PathBuf;
-use std::process::exit;
+use std::time::Duration;
 
-fn main() {
-    if let Err(e) = run() {
-        tracing::error!(error = ?e, "Application failed");
-        exit(1);
+#[tokio::main]
+async fn main() {
+    if let Err(e) = run().await {
+        // Using eprintln to ensure the error message is visible even if the UI is active.
+        eprintln!("\n{} {}", style("Error:").red().bold(), e);
+        std::process::exit(1);
     }
 }
 
 #[tracing::instrument]
-fn run() -> AppResult<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+async fn run() -> AppResult<()> {
     let cli = Cli::parse();
 
-    // Expand the user-provided path (e.g., `~` to the home directory).
+    // Conditionally initialize the tracing subscriber based on the verbose flag.
+    if cli.verbose > 0 {
+        let level = match cli.verbose {
+            1 => "info",
+            2 => "debug",
+            _ => "trace",
+        };
+        let filter = format!("isoterm={}", level);
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .with_writer(std::io::stderr) // Write logs to stderr to not interfere with UI
+            .init();
+    }
+
+    // Expand the user-provided path.
     let dest_dir_str = shellexpand::tilde(&cli.dest_dir).to_string();
     let env_dir = PathBuf::from(dest_dir_str);
 
-    tracing::info!(path = %env_dir.display(), "Setting up environment");
+    // Create environment directories.
+    fs::create_dir_all(env_dir.join("bin"))?;
+    fs::create_dir_all(env_dir.join("config"))?;
+    fs::create_dir_all(env_dir.join("data"))?;
 
-    // Create the main environment directory and its subdirectories.
-    let bin_dir = env_dir.join("bin");
-    let config_dir = env_dir.join("config");
-    let data_dir = env_dir.join("data");
-    fs::create_dir_all(&bin_dir)?;
-    fs::create_dir_all(&config_dir)?;
-    fs::create_dir_all(&data_dir)?;
+    // --- UI Setup ---
+    let mp = MultiProgress::new();
+    let spinner_style = ProgressStyle::with_template("{spinner:.green} {msg}")?
+        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏-");
 
-    tracing::info!("Created environment directories.");
+    mp.println(format!(
+        "{} Setting up environment in {}",
+        style("✓").green(),
+        style(env_dir.display()).cyan()
+    ))?;
 
     // Define the list of tools to be provisioned.
     let tools = vec![
@@ -77,21 +96,34 @@ fn run() -> AppResult<()> {
             name: "helix",
             repo: "helix-editor/helix",
             binary_name: "hx",
-            path_in_archive: Some("hx"), // The extraction logic will strip the top-level dir
+            path_in_archive: Some("hx"),
         },
     ];
 
-    // Provision each tool.
+    // --- Provisioning Loop ---
     for tool in &tools {
-        provision_tool(&env_dir, tool)?;
+        let pb = mp.add(ProgressBar::new_spinner());
+        pb.enable_steady_tick(Duration::from_millis(120));
+        pb.set_style(spinner_style.clone());
+        provision_tool(&env_dir, tool, &pb).await?;
     }
 
-    // Generate all configuration files.
-    config::generate_configs(&env_dir)?;
+    // --- Configuration Step ---
+    let pb_config = mp.add(ProgressBar::new_spinner());
+    pb_config.enable_steady_tick(Duration::from_millis(120));
+    pb_config.set_style(spinner_style.clone());
+    config::generate_configs(&env_dir, &pb_config).await?;
 
-    tracing::info!("\n🚀 Environment setup complete!");
-    tracing::info!("To activate your new shell environment, run:");
-    tracing::info!("\n  source {}\n", env_dir.join("activate.sh").display());
+    // Final success messages.
+    mp.println(format!(
+        "\n{} Environment setup complete!",
+        style("🚀").green()
+    ))?;
+    mp.println("To activate your new shell environment, run:".to_string())?;
+    mp.println(format!(
+        "\n  source {}\n",
+        env_dir.join("activate.sh").display()
+    ))?;
 
     Ok(())
 }

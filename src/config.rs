@@ -1,11 +1,15 @@
 use crate::error::AppResult;
-use anyhow::Context;
+use anyhow::{anyhow, Context};
+use console::style;
+use indicatif::ProgressBar;
 use std::fs;
 use std::path::Path;
 
 /// Generates all necessary configuration files and the activation script.
-#[tracing::instrument(skip(env_dir))]
-pub fn generate_configs(env_dir: &Path) -> AppResult<()> {
+#[tracing::instrument(skip(env_dir, pb))]
+pub async fn generate_configs(env_dir: &Path, pb: &ProgressBar) -> AppResult<()> {
+    pb.set_message("Generating configuration files...");
+
     let config_dir = env_dir.join("config");
     fs::create_dir_all(&config_dir).context("Failed to create config directory")?;
 
@@ -24,7 +28,10 @@ pub fn generate_configs(env_dir: &Path) -> AppResult<()> {
     // Generate helix config
     write_helix_config(env_dir)?;
 
-    tracing::info!("All configuration files generated successfully.");
+    pb.finish_with_message(format!(
+        "{} Generated configuration files",
+        style("✓").green()
+    ));
     Ok(())
 }
 
@@ -32,31 +39,18 @@ pub fn generate_configs(env_dir: &Path) -> AppResult<()> {
 #[tracing::instrument(skip(env_dir))]
 fn write_activate_script(env_dir: &Path) -> AppResult<()> {
     let script_content = r#"#!/bin/sh
-
-# Get the absolute path to the environment directory
 ENV_DIR=$(cd "$(dirname "$0")" && pwd)
-
-# Prepend our private bin directory to the PATH
 export PATH="$ENV_DIR/bin:$PATH"
-
-# Set environment variables to use our private configs
 export STARSHIP_CONFIG="$ENV_DIR/config/starship.toml"
 export ATUIN_CONFIG_DIR="$ENV_DIR/config/atuin"
 export HELIX_CONFIG="$ENV_DIR/config/helix/config.toml"
-
-# Set environment variable to tell fish where its runtime files are
 export FISH_HOME="$ENV_DIR/fish_runtime"
-
-# Execute fish shell
-# The '-l' flag makes it a login shell
-# The '-C' flag sets the initial command to source our config
 exec "$ENV_DIR/bin/fish" -l -C "source '$ENV_DIR/config/fish/config.fish'"
 "#;
 
     let script_path = env_dir.join("activate.sh");
     fs::write(&script_path, script_content).context("Failed to write activate.sh")?;
 
-    // Make the script executable
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -73,17 +67,10 @@ fn write_fish_config(env_dir: &Path) -> AppResult<()> {
     fs::create_dir_all(&fish_config_dir).context("Failed to create fish config directory")?;
 
     let config_content = r#"if status is-interactive
-    # Starship prompt
     starship init fish | source
-
-    # Atuin shell history
     atuin init fish | source
-
-    # Zoxide directory jumper
     zoxide init fish | source
 end
-
-# Welcome message
 echo "Welcome to your isolated shell environment!"
 echo "Type 'exit' to return to your regular shell."
 "#;
@@ -98,9 +85,7 @@ echo "Type 'exit' to return to your regular shell."
 fn write_starship_config(env_dir: &Path) -> AppResult<()> {
     let config_path = env_dir.join("config").join("starship.toml");
     let config_content = r#"
-# Inserts a blank line between shell prompts
 add_newline = true
-
 [character]
 success_symbol = "[➜](bold green)"
 error_symbol = "[➜](bold red)"
@@ -112,30 +97,22 @@ error_symbol = "[➜](bold red)"
 /// Creates a default `atuin/config.toml` configuration.
 #[tracing::instrument(skip(env_dir))]
 fn write_atuin_config(env_dir: &Path) -> AppResult<()> {
-    // Define the specific data directory for atuin
     let atuin_data_dir = env_dir.join("data").join("atuin");
     fs::create_dir_all(&atuin_data_dir).context("Failed to create atuin data directory")?;
 
-    // Define the absolute path for the history database
     let db_path = atuin_data_dir.join("history.db");
     let db_path_str = db_path
         .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Invalid non-UTF8 path for atuin database"))?;
+        .ok_or_else(|| anyhow!("Invalid non-UTF8 path for atuin database"))?;
 
-    // Create the config content with the absolute path
     let config_content = format!(
-        r#"# The database path for Atuin history.
-# This is isolated within the environment's data directory.
-db_path = "{}"
-
+        r#"db_path = "{}"
 sync_frequency = "5m"
 sync_address = "https://api.atuin.sh"
 "#,
-        // Ensure forward slashes for cross-platform TOML compatibility
         db_path_str.replace('\\', "/")
     );
 
-    // Write the config file
     let atuin_config_dir = env_dir.join("config").join("atuin");
     fs::create_dir_all(&atuin_config_dir)?;
     let config_path = atuin_config_dir.join("config.toml");
@@ -152,47 +129,36 @@ fn write_helix_config(env_dir: &Path) -> AppResult<()> {
     let config_toml_path = helix_config_dir.join("config.toml");
     let config_toml_content = r#"
 theme = "tokyonight_moon"
-
 [editor]
 cursorline = true
 cursorcolumn = true
 bufferline = "multiple"
 end-of-line-diagnostics = "hint"
-
 [editor.file-picker]
 git-ignore = true
-
 [editor.cursor-shape]
 insert = "bar"
 normal = "block"
 select = "underline"
-
 [editor.auto-save]
 after-delay.enable = true
 after-delay.timeout = 5000
-
 [editor.whitespace.render]
 space = "all"
 tab = "all"
 newline = "all"
-
 [editor.whitespace.characters]
 tab = "⇥"
 tabpad = "✶"
-
 [editor.indent-guides]
 render = true
 character = "╎"
-
 [editor.soft-wrap]
 enable = true
-
 [editor.smart-tab]
 supersede-menu = true
-
 [editor.inline-diagnostics]
 cursor-line = "error"
-
 [keys.normal]
 C-A-left = ":bp"
 C-A-right = ":bn"
@@ -204,12 +170,10 @@ C-A-right = ":bn"
 [[language]]
 name = "python"
 auto-format = true
-
 [[language]]
 name = "cpp"
 auto-format = true
 formatter = { command = "clang-format" }
-
 [[language]]
 name = "typescript"
 scope = "source.ts"
