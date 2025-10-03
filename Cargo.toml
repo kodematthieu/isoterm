@@ -4,4 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.48", features = ["derive"] }
 cmd-exists = "0.1.2"
+flate2 = "1.1.2"
+reqwest = { version = "0.12.23", features = ["blocking", "json"] }
+serde_json = "1.0.145"
+shellexpand = "3.1.1"
+tar = "0.4.44"
+which = "8.0.0"
+xz2 = "0.1.7"
+zip = "5.1.1"
