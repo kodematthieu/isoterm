@@ -4,21 +4,152 @@ use std::process::Command;
 fn main() {
     if cmd_exists("fish").is_ok() {
         println!("Fish is already installed.");
-        return;
+    } else {
+        println!("Fish is not installed. Installing...");
+
+        if cfg!(target_os = "linux") {
+            install_fish_linux();
+        } else if cfg!(target_os = "macos") {
+            install_fish_macos();
+        } else if cfg!(target_os = "windows") {
+            install_fish_windows();
+        } else if cfg!(target_os = "android") {
+            install_fish_android();
+        } else {
+            eprintln!("Unsupported operating system.");
+        }
     }
 
-    println!("Fish is not installed. Installing...");
-
-    if cfg!(target_os = "linux") {
-        install_fish_linux();
-    } else if cfg!(target_os = "macos") {
-        install_fish_macos();
-    } else if cfg!(target_os = "windows") {
-        install_fish_windows();
-    } else if cfg!(target_os = "android") {
-        install_fish_android();
+    if cmd_exists("fish").is_ok() {
+        install_additional_tools();
     } else {
-        eprintln!("Unsupported operating system.");
+        eprintln!("Fish installation failed or not found, skipping additional tools.");
+    }
+}
+
+fn install_additional_tools() {
+    println!("Checking for additional tools...");
+
+    if !cmd_exists("atuin").is_ok() {
+        println!("Atuin is not installed. Installing...");
+        install_atuin();
+    } else {
+        println!("Atuin is already installed.");
+    }
+
+    if !cmd_exists("zoxide").is_ok() {
+        println!("Zoxide is not installed. Installing...");
+        install_zoxide();
+    } else {
+        println!("Zoxide is already installed.");
+    }
+
+    if !cmd_exists("starship").is_ok() {
+        println!("Starship is not installed. Installing...");
+        install_starship();
+    } else {
+        println!("Starship is already installed.");
+    }
+}
+
+fn install_atuin() {
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        let mut command = Command::new("bash");
+        command.args(&[
+            "-c",
+            "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/atuinsh/atuin/releases/latest/download/atuin-installer.sh | sh -s -- -q",
+        ]);
+        let status = command.status().expect("Failed to execute command");
+        if status.success() {
+            println!("Atuin installed successfully.");
+        } else {
+            eprintln!("Failed to install Atuin.");
+        }
+    } else if cfg!(target_os = "windows") {
+        println!("Atuin installation on Windows requires `cargo`. Please install Rust and run `cargo install atuin` manually.");
+    } else if cfg!(target_os = "android") {
+        let mut command = Command::new("pkg");
+        command.args(&["install", "-y", "atuin"]);
+        let status = command.status().expect("Failed to execute command");
+        if status.success() {
+            println!("Atuin installed successfully.");
+        } else {
+            eprintln!("Failed to install Atuin.");
+        }
+    } else {
+        eprintln!("Unsupported OS for Atuin installation.");
+    }
+}
+
+fn install_zoxide() {
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        let mut command = Command::new("bash");
+        command.args(&[
+            "-c",
+            "curl -sS https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | bash -s -- --sudo ''",
+        ]);
+        let status = command.status().expect("Failed to execute command");
+        if status.success() {
+            println!("Zoxide installed successfully.");
+        } else {
+            eprintln!("Failed to install Zoxide.");
+        }
+    } else if cfg!(target_os = "windows") {
+        let mut command = Command::new("winget");
+        command.args(&["install", "zoxide"]);
+        let status = command.status().expect("Failed to execute command");
+        if status.success() {
+            println!("Zoxide installed successfully.");
+        } else {
+            eprintln!("Failed to install Zoxide.");
+        }
+    } else if cfg!(target_os = "android") {
+        let mut command = Command::new("pkg");
+        command.args(&["install", "-y", "zoxide"]);
+        let status = command.status().expect("Failed to execute command");
+        if status.success() {
+            println!("Zoxide installed successfully.");
+        } else {
+            eprintln!("Failed to install Zoxide.");
+        }
+    } else {
+        eprintln!("Unsupported OS for Zoxide installation.");
+    }
+}
+
+fn install_starship() {
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        let mut command = Command::new("bash");
+        command.args(&[
+            "-c",
+            "curl -sS https://starship.rs/install.sh | sh -s -- -y --bin-dir $HOME/.local/bin",
+        ]);
+        let status = command.status().expect("Failed to execute command");
+        if status.success() {
+            println!("Starship installed successfully.");
+        } else {
+            eprintln!("Failed to install Starship.");
+        }
+    } else if cfg!(target_os = "windows") {
+        let mut command = Command::new("winget");
+        command.args(&["install", "starship"]);
+        let status = command.status().expect("Failed to execute command");
+        if status.success() {
+            println!("Starship installed successfully.");
+        } else {
+            eprintln!("Failed to install Starship.");
+        }
+    } else if cfg!(target_os = "android") {
+        let mut command = Command::new("pkg");
+        command.args(&["install", "-y", "starship"]);
+        let status = command.status().expect("Failed to execute command");
+        if status.success() {
+            println!("Starship installed successfully.");
+        } else {
+            eprintln!("Failed to install Starship.");
+        }
+    } else {
+        eprintln!("Unsupported OS for Starship installation.");
     }
 }
 
