@@ -38,16 +38,7 @@ pub async fn generate_configs(env_dir: &Path, pb: &ProgressBar) -> AppResult<()>
 /// Creates the main `activate.sh` script for the environment.
 #[tracing::instrument(skip(env_dir))]
 fn write_activate_script(env_dir: &Path) -> AppResult<()> {
-    let script_content = r#"#!/bin/sh
-ENV_DIR=$(cd "$(dirname "$0")" && pwd)
-PATH="$ENV_DIR/bin:$PATH" \
-STARSHIP_CONFIG="$ENV_DIR/config/starship.toml" \
-ATUIN_CONFIG_DIR="$ENV_DIR/config/atuin" \
-HELIX_CONFIG="$ENV_DIR/config/helix/config.toml" \
-FISH_HOME="$ENV_DIR/fish_runtime" \
-"$ENV_DIR/bin/fish" -l -C "source '$ENV_DIR/config/fish/config.fish'"
-"#;
-
+    let script_content = include_str!("../templates/activate.sh");
     let script_path = env_dir.join("activate.sh");
     fs::write(&script_path, script_content).context("Failed to write activate.sh")?;
 
@@ -66,16 +57,7 @@ fn write_fish_config(env_dir: &Path) -> AppResult<()> {
     let fish_config_dir = env_dir.join("config").join("fish");
     fs::create_dir_all(&fish_config_dir).context("Failed to create fish config directory")?;
 
-    let config_content = r#"if status is-interactive
-    starship init fish | source
-    atuin init fish | source
-    zoxide init fish | source
-end
-
-function on_exit --on-event fish_exit
-    echo "Exiting isolated shell environment."
-end
-"#;
+    let config_content = include_str!("../templates/config.fish");
 
     let config_path = fish_config_dir.join("config.fish");
     fs::write(config_path, config_content).context("Failed to write config.fish")?;
@@ -86,12 +68,7 @@ end
 #[tracing::instrument(skip(env_dir))]
 fn write_starship_config(env_dir: &Path) -> AppResult<()> {
     let config_path = env_dir.join("config").join("starship.toml");
-    let config_content = r#"
-add_newline = true
-[character]
-success_symbol = "[➜](bold green)"
-error_symbol = "[➜](bold red)"
-"#;
+    let config_content = include_str!("../templates/starship.toml");
     fs::write(config_path, config_content).context("Failed to write starship.toml")?;
     Ok(())
 }
@@ -107,13 +84,8 @@ fn write_atuin_config(env_dir: &Path) -> AppResult<()> {
         .to_str()
         .ok_or_else(|| anyhow!("Invalid non-UTF8 path for atuin database"))?;
 
-    let config_content = format!(
-        r#"db_path = "{}"
-sync_frequency = "5m"
-sync_address = "https://api.atuin.sh"
-"#,
-        db_path_str.replace('\\', "/")
-    );
+    let template_content = include_str!("../templates/atuin/config.toml.template");
+    let config_content = template_content.replace("${DB_PATH}$", &db_path_str.replace('\\', "/"));
 
     let atuin_config_dir = env_dir.join("config").join("atuin");
     fs::create_dir_all(&atuin_config_dir)?;
@@ -129,60 +101,11 @@ fn write_helix_config(env_dir: &Path) -> AppResult<()> {
     fs::create_dir_all(&helix_config_dir).context("Failed to create helix config directory")?;
 
     let config_toml_path = helix_config_dir.join("config.toml");
-    let config_toml_content = r#"
-theme = "tokyonight_moon"
-[editor]
-cursorline = true
-cursorcolumn = true
-bufferline = "multiple"
-end-of-line-diagnostics = "hint"
-[editor.file-picker]
-git-ignore = true
-[editor.cursor-shape]
-insert = "bar"
-normal = "block"
-select = "underline"
-[editor.auto-save]
-after-delay.enable = true
-after-delay.timeout = 5000
-[editor.whitespace.render]
-space = "all"
-tab = "all"
-newline = "all"
-[editor.whitespace.characters]
-tab = "⇥"
-tabpad = "✶"
-[editor.indent-guides]
-render = true
-character = "╎"
-[editor.soft-wrap]
-enable = true
-[editor.smart-tab]
-supersede-menu = true
-[editor.inline-diagnostics]
-cursor-line = "error"
-[keys.normal]
-C-A-left = ":bp"
-C-A-right = ":bn"
-"#;
+    let config_toml_content = include_str!("../templates/helix/config.toml");
     fs::write(config_toml_path, config_toml_content).context("Failed to write helix/config.toml")?;
 
     let languages_toml_path = helix_config_dir.join("languages.toml");
-    let languages_toml_content = r#"
-[[language]]
-name = "python"
-auto-format = true
-[[language]]
-name = "cpp"
-auto-format = true
-formatter = { command = "clang-format" }
-[[language]]
-name = "typescript"
-scope = "source.ts"
-roots = ["package.json", "tsconfig.json"]
-language-servers = ["typescript-language-server"]
-formatter = { command = "prettier", args = ["--stdin-filepath", "{file}"] }
-"#;
+    let languages_toml_content = include_str!("../templates/helix/languages.toml");
     fs::write(languages_toml_path, languages_toml_content)
         .context("Failed to write helix/languages.toml")?;
 
