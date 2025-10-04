@@ -302,10 +302,17 @@ fn extract_archive<R: io::Read>(archive: &mut Archive<R>, target_dir: &Path) -> 
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
         let path = entry.path()?.to_path_buf();
-        let stripped_path = path
-            .strip_prefix(path.components().next().unwrap())
-            .unwrap_or(&path);
+
+        // If the path has more than one component, it's nested in a top-level directory.
+        // In that case, we strip the top-level directory. Otherwise, we use the path as is.
+        let stripped_path = if path.components().count() > 1 {
+            path.strip_prefix(path.components().next().unwrap())
+                .unwrap_or(&path)
+        } else {
+            &path
+        };
         let outpath = target_dir.join(stripped_path);
+
         if entry.header().entry_type().is_dir() {
             fs::create_dir_all(&outpath)?;
         } else {
