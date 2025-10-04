@@ -19,39 +19,49 @@ The tool prioritizes using what's already on your system. For each required comm
 
 This ensures the environment is lightweight and avoids redundant downloads.
 
-## Usage Instructions
+## Usage
 
-### 1. Build the Tool
-You can build the project from source using Cargo:
+Create a new isolated environment by running the setup script. You can pipe it directly into `sh` from GitHub.
+
+This script automatically detects your OS and architecture, downloads the correct pre-compiled binary, runs it to set up the environment, and then cleans up after itself. The `isoterm` binary is not permanently installed.
+
+#### Create an environment in the default location (`~/.local_shell`):
 ```sh
-cargo build --release
-```
-The binary will be located at `target/release/isoterm`.
-
-### 2. Create an Environment
-Run the executable. You can optionally provide a path where the environment directory will be created. If you don't provide a path, it will default to `~/.local_shell`.
-
-```sh
-# Create an environment in the default location
-./target/release/isoterm
-
-# Or, create an environment in a specific directory
-./target/release/isoterm ./my-temp-env
+curl -sSL "https://github.com/kodematthieu/isoterm/releases/latest/download/setup.sh" | sh
 ```
 
-The tool will print its progress as it provisions each tool and generates the necessary configuration files.
+#### Create an environment in a specific directory:
+You can pass arguments to the script, which are forwarded directly to the `isoterm` executable.
+```sh
+curl -sSL "https://github.com/kodematthieu/isoterm/releases/latest/download/setup.sh" | sh -s -- ./my-temp-env
+```
 
-### 3. Activate the Environment
+The script will print its progress as it provisions each tool and generates the necessary configuration files.
+
+### Activate the Environment
 Once the setup is complete, you can activate the new environment by sourcing the `activate.sh` script.
 
 ```sh
-# If you used the custom path
+# If you used a custom path
 source ./my-temp-env/activate.sh
 
 # If you used the default path
 source ~/.local_shell/activate.sh
 ```
 You will be dropped into a new `fish` shell session with all tools ready to use. To exit the environment, simply type `exit`.
+
+## Building from Source
+
+If you prefer to build the project from source (e.g., for development), you will need the Rust toolchain installed.
+
+You can build the project using Cargo:
+```sh
+cargo build --release
+```
+The binary will be located at `target/release/isoterm`. You can then run it directly:
+```sh
+./target/release/isoterm ./my-dev-env
+```
 
 ## Uninstallation Instructions
 
