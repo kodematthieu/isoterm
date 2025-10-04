@@ -6,4 +6,3 @@ pre-build = [
 ]
 
 [target.aarch64-linux-android]
-image = "messense/rust-musl-cross:aarch64-linux-android"
