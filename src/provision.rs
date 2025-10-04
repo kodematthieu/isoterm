@@ -4,6 +4,7 @@ use console::style;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
+use pathdiff;
 use serde_json::Value;
 use std::env;
 use std::fs::{self, File};
@@ -390,15 +391,89 @@ fn extract_zip<R: Read + Seek>(
 #[cfg(unix)]
 #[tracing::instrument]
 fn create_symlink(original: &Path, link: &Path) -> AppResult<()> {
-    symlink(original, link).context("Failed to create symlink")
+    let link_parent = link.parent().unwrap_or_else(|| Path::new(""));
+    let relative_path = pathdiff::diff_paths(original, link_parent)
+        .ok_or_else(|| anyhow!("Failed to calculate relative path for symlink"))?;
+    symlink(relative_path, link).context("Failed to create symlink")
 }
 
 #[cfg(windows)]
 #[tracing::instrument]
 fn create_symlink(original: &Path, link: &Path) -> AppResult<()> {
+    let link_parent = link.parent().unwrap_or_else(|| Path::new(""));
+    let relative_path = pathdiff::diff_paths(original, link_parent)
+        .ok_or_else(|| anyhow!("Failed to calculate relative path for symlink"))?;
+
     if original.is_dir() {
-        symlink_dir(original, link).context("Failed to create directory symlink")
+        symlink_dir(relative_path, link).context("Failed to create directory symlink")
     } else {
-        symlink_file(original, link).context("Failed to create file symlink")
+        symlink_file(relative_path, link).context("Failed to create file symlink")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    #[cfg(unix)]
+    fn test_create_relative_symlink_unix() -> AppResult<()> {
+        let dir = tempdir()?;
+        let tool_dir = dir.path().join("my_tool");
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(&tool_dir)?;
+        fs::create_dir_all(&bin_dir)?;
+
+        let original_path = tool_dir.join("my_binary");
+        let link_path = bin_dir.join("my_binary_link");
+
+        // Create a dummy file to link to
+        fs::write(&original_path, "binary content")?;
+
+        create_symlink(&original_path, &link_path)?;
+
+        // Verify that the link exists and is a symlink
+        assert!(link_path.exists());
+        assert!(fs::symlink_metadata(&link_path)?.file_type().is_symlink());
+
+        // Verify that the link is relative
+        let link_target = fs::read_link(&link_path)?;
+        assert_eq!(link_target.to_str(), Some("../my_tool/my_binary"));
+
+        // Verify that the resolved path is correct
+        let resolved_path = fs::canonicalize(&link_path)?;
+        assert_eq!(resolved_path, fs::canonicalize(&original_path)?);
+
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_create_relative_symlink_windows() -> AppResult<()> {
+        let dir = tempdir()?;
+        let tool_dir = dir.path().join("my_tool");
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(&tool_dir)?;
+        fs::create_dir_all(&bin_dir)?;
+
+        let original_path = tool_dir.join("my_binary");
+        let link_path = bin_dir.join("my_binary_link");
+
+        // Create a dummy file to link to
+        fs::write(&original_path, "binary content")?;
+
+        create_symlink(&original_path, &link_path)?;
+
+        // Verify that the link exists and is a symlink
+        assert!(link_path.exists());
+        assert!(fs::symlink_metadata(&link_path)?.file_type().is_symlink());
+
+        // Verify that the resolved path is correct
+        let resolved_path = fs::canonicalize(&link_path)?;
+        assert_eq!(resolved_path, fs::canonicalize(&original_path)?);
+
+        Ok(())
     }
 }
