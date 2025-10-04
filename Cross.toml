@@ -1,8 +1,12 @@
 [target.aarch64-unknown-linux-gnu]
 pre-build = [
-    "dpkg --add-architecture arm64",
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update",
-    "apt-get install -y libssl-dev:arm64",
+    "apt-get install -y libssl-dev:$CROSS_DEB_ARCH",
 ]
 
 [target.aarch64-linux-android]
+pre-build = [
+    "apt-get update",
+    "apt-get install -y openssl-dev",
+]
