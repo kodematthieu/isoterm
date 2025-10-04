@@ -74,7 +74,7 @@ main() {
   else
     # If the script IS versioned, check if a newer stable release exists.
     latest_tag=$(get_latest_tag)
-    if [ "$VERSION" != "$latest_tag" ]; then
+    if [ -n "$latest_tag" ] && [ "$VERSION" != "$latest_tag" ]; then
       # Check if VERSION contains a hyphen to identify it as a pre-release
       case "$VERSION" in
         *-*)

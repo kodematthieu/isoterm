@@ -27,7 +27,7 @@ jobs:
       - name: Prepare setup script
         run: |
           VERSION="${{ steps.get_version.outputs.VERSION }}"
-          sed -i "s|<PLACEHOLDER_VERSION>|${VERSION}|g" setup.sh
+          sed -i "s#^VERSION=.*#VERSION=\"${VERSION}\"#" setup.sh
 
       - name: Determine pre-release status
         id: is_prerelease
