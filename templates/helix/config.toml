@@ -1,34 +1,45 @@
 theme = "tokyonight_moon"
+
 [editor]
 cursorline = true
 cursorcolumn = true
 bufferline = "multiple"
 end-of-line-diagnostics = "hint"
+
 [editor.file-picker]
 git-ignore = true
+
 [editor.cursor-shape]
 insert = "bar"
 normal = "block"
 select = "underline"
+
 [editor.auto-save]
 after-delay.enable = true
 after-delay.timeout = 5000
+
 [editor.whitespace.render]
 space = "all"
 tab = "all"
 newline = "all"
+
 [editor.whitespace.characters]
 tab = "⇥"
 tabpad = "✶"
+
 [editor.indent-guides]
 render = true
 character = "╎"
+
 [editor.soft-wrap]
 enable = true
+
 [editor.smart-tab]
 supersede-menu = true
+
 [editor.inline-diagnostics]
 cursor-line = "error"
+
 [keys.normal]
 C-A-left = ":bp"
 C-A-right = ":bn"

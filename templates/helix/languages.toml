@@ -1,10 +1,12 @@
 [[language]]
 name = "python"
 auto-format = true
+
 [[language]]
 name = "cpp"
 auto-format = true
 formatter = { command = "clang-format" }
+
 [[language]]
 name = "typescript"
 scope = "source.ts"
