@@ -24,5 +24,14 @@ xz2 = "0.1.7"
 pathdiff = "0.2.3"
 zip = "5.1.1"
 
+[target.'aarch64-linux-android'.dependencies.reqwest]
+version = "0.12.23"
+default-features = false
+features = ["json", "stream", "native-tls-vendored"]
+
 [dev-dependencies]
 wiremock = "0.6.0"
+
+[[bin]]
+name = "isoterm"
+test = false
