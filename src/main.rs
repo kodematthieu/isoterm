@@ -6,11 +6,12 @@ mod provision;
 use crate::cli::Cli;
 use crate::error::AppResult;
 use crate::provision::{provision_tool, Tool};
+use anyhow::Context;
 use clap::Parser;
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[tokio::main]
@@ -43,11 +44,6 @@ async fn run() -> AppResult<()> {
     // Expand the user-provided path.
     let dest_dir_str = shellexpand::tilde(&cli.dest_dir).to_string();
     let env_dir = PathBuf::from(dest_dir_str);
-
-    // Create environment directories.
-    fs::create_dir_all(env_dir.join("bin"))?;
-    fs::create_dir_all(env_dir.join("config"))?;
-    fs::create_dir_all(env_dir.join("data"))?;
 
     // --- UI Setup ---
     let mp = MultiProgress::new();
@@ -100,19 +96,20 @@ async fn run() -> AppResult<()> {
         },
     ];
 
-    // --- Provisioning Loop ---
-    for tool in &tools {
-        let pb = mp.add(ProgressBar::new_spinner());
-        pb.enable_steady_tick(Duration::from_millis(120));
-        pb.set_style(spinner_style.clone());
-        provision_tool(&env_dir, tool, &pb, &spinner_style).await?;
+    // --- Main Transactional Block ---
+    if let Err(e) = setup_environment(&env_dir, &tools, &mp, &spinner_style).await {
+        eprintln!(
+            "\n{} {}",
+            style("Fatal:").red().bold(),
+            style(&e).red().bold()
+        );
+        eprintln!("{}", style("Cleaning up partially created environment...").yellow());
+        fs::remove_dir_all(&env_dir)
+            .context("Failed to clean up environment directory during error recovery")?;
+        eprintln!("{}", style("Cleanup complete.").green());
+        // Propagate the original error to exit with a non-zero status code.
+        return Err(e);
     }
-
-    // --- Configuration Step ---
-    let pb_config = mp.add(ProgressBar::new_spinner());
-    pb_config.enable_steady_tick(Duration::from_millis(120));
-    pb_config.set_style(spinner_style.clone());
-    config::generate_configs(&env_dir, &pb_config).await?;
 
     // Final success messages.
     mp.println(format!(
@@ -124,6 +121,41 @@ async fn run() -> AppResult<()> {
         "\n  source {}\n",
         env_dir.join("activate.sh").display()
     ))?;
+
+    Ok(())
+}
+
+/// Encapsulates the entire environment setup process. If any step fails,
+/// it returns an error, allowing the caller to perform a cleanup.
+#[tracing::instrument(skip(env_dir, tools, mp, spinner_style))]
+async fn setup_environment(
+    env_dir: &Path,
+    tools: &[Tool],
+    mp: &MultiProgress,
+    spinner_style: &ProgressStyle,
+) -> AppResult<()> {
+    // Create environment directories.
+    fs::create_dir_all(env_dir.join("bin"))?;
+    fs::create_dir_all(env_dir.join("config"))?;
+    fs::create_dir_all(env_dir.join("data"))?;
+
+    // --- Provisioning Loop ---
+    for tool in tools {
+        let pb = mp.add(ProgressBar::new_spinner());
+        pb.enable_steady_tick(Duration::from_millis(120));
+        pb.set_style(spinner_style.clone());
+        provision_tool(env_dir, tool, &pb, spinner_style)
+            .await
+            .with_context(|| format!("Failed to provision tool: '{}'", tool.name))?;
+    }
+
+    // --- Configuration Step ---
+    let pb_config = mp.add(ProgressBar::new_spinner());
+    pb_config.enable_steady_tick(Duration::from_millis(120));
+    pb_config.set_style(spinner_style.clone());
+    config::generate_configs(env_dir, &pb_config)
+        .await
+        .context("Failed to generate configuration files")?;
 
     Ok(())
 }
