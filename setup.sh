@@ -66,8 +66,13 @@ main() {
   api_url="$TAG_API_URL_TEMPLATE"
   release_source_msg="release '$VERSION'"
 
-  # Check if a newer version exists, but only if the script is versioned.
-  if [ "$VERSION" != "<PLACEHOLDER_VERSION>" ]; then
+  # If the script is not versioned (i.e., placeholder wasn't replaced),
+  # default to the latest stable release.
+  if [ "$VERSION" = "<PLACEHOLDER_VERSION>" ]; then
+    api_url="$LATEST_API_URL"
+    release_source_msg="latest release"
+  else
+    # If the script IS versioned, check if a newer stable release exists.
     latest_tag=$(get_latest_tag)
     if [ "$VERSION" != "$latest_tag" ]; then
       # Check if VERSION contains a hyphen to identify it as a pre-release
@@ -95,10 +100,6 @@ main() {
           ;;
       esac
     fi
-  else
-    # Fallback for unversioned/local script: always use latest.
-    api_url="$LATEST_API_URL"
-    release_source_msg="latest release"
   fi
 
   target=$(get_platform)
@@ -108,10 +109,12 @@ main() {
   # Find download URL for the target asset from the selected API endpoint
   download_url=$(curl -s "$api_url" | grep "browser_download_url.*${target}\\.tar\\.gz" | cut -d '"' -f 4 | head -n 1)
 
+  # Gracefully exit if no binary is found for the target platform.
   if [ -z "$download_url" ]; then
-    echo "Error: Could not find a release asset for your platform ($target) in $release_source_msg." >&2
-    echo "Please check the releases page: https://github.com/${GITHUB_USER}/${GITHUB_REPO}/releases" >&2
-    exit 1
+    echo "Note: A pre-compiled binary for your platform ($target) was not found in $release_source_msg."
+    echo "This platform is not currently supported by this release."
+    echo "You can check for available assets here: https://github.com/${GITHUB_USER}/${GITHUB_REPO}/releases"
+    exit 0
   fi
 
   # Create a temporary directory for the download and extraction

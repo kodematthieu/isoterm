@@ -7,79 +7,18 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write # To create releases and upload assets
+
 jobs:
-  build-release:
-    name: Build Release Assets
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-linux-android
-            os: ubuntu-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install cross-compilation tool
-        # 'cross' is not needed for native macOS builds or the primary Linux GNU target.
-        # It's used for cross-compiling to other Linux-based targets from the Ubuntu runner.
-        if: runner.os == 'Linux' && matrix.target != 'x86_64-unknown-linux-gnu'
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build binary
-        run: |
-          # Use 'cargo' for native builds (macOS and the primary Linux target on its runner)
-          # and 'cross' for all other cross-compilation targets on Linux runners.
-          if [[ "${{ runner.os }}" == "macOS" || "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
-            cargo build --release --target ${{ matrix.target }}
-            BINARY_PATH="target/${{ matrix.target }}/release/isoterm"
-          else
-            cross build --release --target ${{ matrix.target }}
-            BINARY_PATH="target/${{ matrix.target }}/release/isoterm"
-          fi
-
-          # Create archive
-          ARCHIVE_NAME="isoterm-${{ matrix.target }}.tar.gz"
-          tar -czf "$ARCHIVE_NAME" -C "$(dirname "$BINARY_PATH")" "$(basename "$BINARY_PATH")"
-          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-assets-${{ matrix.target }}
-          path: ${{ env.ARCHIVE_NAME }}
-
-  publish-release:
+  create-release:
     name: Create GitHub Release
-    needs: build-release
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # Required to create a release
-
+    outputs:
+      version: ${{ steps.get_version.outputs.VERSION }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Download all release assets
-        uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-          pattern: release-assets-*
-          merge-multiple: true
 
       - name: Get tag version
         id: get_version
@@ -88,9 +27,7 @@ jobs:
       - name: Prepare setup script
         run: |
           VERSION="${{ steps.get_version.outputs.VERSION }}"
-          # Use a different separator for sed to avoid conflicts with slashes in the version
           sed -i "s|<PLACEHOLDER_VERSION>|${VERSION}|g" setup.sh
-          mv setup.sh release-assets/
 
       - name: Determine pre-release status
         id: is_prerelease
@@ -125,7 +62,6 @@ jobs:
           \`\`\`
           EOF
           )
-          # Use a heredoc to safely pass the multiline string to the output
           {
             echo "NOTES<<EOF"
             echo "$NOTES"
@@ -139,4 +75,56 @@ jobs:
           name: Release ${{ steps.get_version.outputs.VERSION }}
           body: ${{ steps.release_notes.outputs.NOTES }}
           prerelease: ${{ steps.is_prerelease.outputs.prerelease }}
-          files: release-assets/*
+          files: setup.sh
+
+  build-and-upload:
+    name: Build and Upload Assets
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tool
+        if: runner.os == 'Linux' && matrix.target != 'x86_64-unknown-linux-gnu'
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build binary
+        run: |
+          if [[ "${{ runner.os }}" == "macOS" || "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
+            cargo build --release --target ${{ matrix.target }}
+            BINARY_PATH="target/${{ matrix.target }}/release/isoterm"
+          else
+            cross build --release --target ${{ matrix.target }}
+            BINARY_PATH="target/${{ matrix.target }}/release/isoterm"
+          fi
+
+          ARCHIVE_NAME="isoterm-${{ matrix.target }}.tar.gz"
+          tar -czf "$ARCHIVE_NAME" -C "$(dirname "$BINARY_PATH")" "$(basename "$BINARY_PATH")"
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
+
+      - name: Upload Release Asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ needs.create-release.outputs.version }} ${{ env.ARCHIVE_NAME }}
