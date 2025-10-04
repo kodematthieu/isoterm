@@ -66,7 +66,7 @@ async fn run() -> AppResult<()> {
             name: "fish",
             repo: "fish-shell/fish-shell",
             binary_name: "fish",
-            path_in_archive: Some("bin/fish"),
+            path_in_archive: Some("fish"),
         },
         Tool {
             name: "starship",
