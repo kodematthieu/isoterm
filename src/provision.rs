@@ -122,7 +122,13 @@ async fn download_and_install_binary(
     pb: &ProgressBar,
     spinner_style: &ProgressStyle,
 ) -> AppResult<()> {
-    let (download_url, asset_name) = find_github_release_asset_url(tool).await?;
+    let (download_url, asset_name) = find_github_release_asset_url(
+        tool,
+        "https://api.github.com",
+        env::consts::OS,
+        env::consts::ARCH,
+    )
+    .await?;
     let temp_file = download_to_temp_file(&download_url, &asset_name, pb).await?;
 
     pb.set_style(spinner_style.clone());
@@ -164,7 +170,13 @@ async fn download_and_install_archive(
     pb: &ProgressBar,
     spinner_style: &ProgressStyle,
 ) -> AppResult<()> {
-    let (download_url, asset_name) = find_github_release_asset_url(tool).await?;
+    let (download_url, asset_name) = find_github_release_asset_url(
+        tool,
+        "https://api.github.com",
+        env::consts::OS,
+        env::consts::ARCH,
+    )
+    .await?;
     let temp_file = download_to_temp_file(&download_url, &asset_name, pb).await?;
     let file = temp_file.reopen()?;
 
@@ -206,9 +218,14 @@ async fn download_and_install_archive(
     Ok(())
 }
 
-#[tracing::instrument]
-async fn find_github_release_asset_url(tool: &Tool) -> AppResult<(String, String)> {
-    let repo_url = format!("https://api.github.com/repos/{}/releases/latest", tool.repo);
+#[tracing::instrument(skip(base_url, os, arch))]
+async fn find_github_release_asset_url(
+    tool: &Tool,
+    base_url: &str,
+    os: &str,
+    arch: &str,
+) -> AppResult<(String, String)> {
+    let repo_url = format!("{}/repos/{}/releases/latest", base_url, tool.repo);
     let client = reqwest::Client::builder().user_agent("isoterm").build()?;
 
     let response: Value = client
@@ -224,33 +241,29 @@ async fn find_github_release_asset_url(tool: &Tool) -> AppResult<(String, String
         .as_array()
         .ok_or_else(|| anyhow!("No assets found in release for {}", tool.repo))?;
 
-    let arch = env::consts::ARCH;
-    let os_targets: Vec<&str> = match env::consts::OS {
+    let os_targets: Vec<&str> = match os {
         "linux" => match tool.name {
             "fish" | "helix" => vec!["linux"],
             _ => vec!["unknown-linux-gnu", "unknown-linux-musl"],
         },
         "macos" => vec!["apple-darwin"],
         "windows" => vec!["pc-windows-msvc"],
-        _ => return Err(anyhow!("Unsupported OS: {}", env::consts::OS)),
+        _ => return Err(anyhow!("Unsupported OS: {}", os)),
     };
 
-    let ext = if env::consts::OS == "windows" {
+    let ext = if os == "windows" {
         "zip"
     } else {
         match tool.name {
-            "helix" if env::consts::OS == "linux" => "tar.xz",
-            "helix" if env::consts::OS == "macos" => "zip",
+            "helix" if os == "linux" => "tar.xz",
+            "helix" if os == "macos" => "zip",
             "fish" => "tar.xz",
             _ => "tar.gz",
         }
     };
 
     for os_target in &os_targets {
-        let mut fragments_to_use = vec![arch, *os_target, ext];
-        if tool.name != "ripgrep" {
-            fragments_to_use.insert(0, tool.name);
-        }
+        let fragments_to_use = vec![tool.name, arch, *os_target, ext];
 
         tracing::debug!(fragments = ?fragments_to_use, "Searching for asset");
 
@@ -473,6 +486,53 @@ mod tests {
         // Verify that the resolved path is correct
         let resolved_path = fs::canonicalize(&link_path)?;
         assert_eq!(resolved_path, fs::canonicalize(&original_path)?);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_find_github_release_asset_url_ripgrep_logic() -> AppResult<()> {
+        // Start a mock server.
+        let mock_server = wiremock::MockServer::start().await;
+        // Mock the GitHub API response.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/repos/BurntSushi/ripgrep/releases/latest",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "assets": [
+                    {
+                        "name": "decoy-asset-14.1.0-x86_64-unknown-linux-musl.tar.gz",
+                        "browser_download_url": "https://example.com/decoy.tar.gz"
+                    },
+                    {
+                        "name": "ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz",
+                        "browser_download_url": "https://example.com/ripgrep.tar.gz"
+                    }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let tool = Tool {
+            name: "ripgrep",
+            repo: "BurntSushi/ripgrep",
+            binary_name: "rg",
+            path_in_archive: None,
+        };
+
+        let (url, name) =
+            find_github_release_asset_url(&tool, &mock_server.uri(), "linux", "x86_64").await?;
+
+        // This assertion will fail with the buggy logic but pass with the fix.
+        assert_eq!(
+            name, "ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz",
+            "The correct asset should be selected after the fix"
+        );
+        assert_eq!(
+            url, "https://example.com/ripgrep.tar.gz",
+            "The correct asset URL should be selected after the fix"
+        );
 
         Ok(())
     }
