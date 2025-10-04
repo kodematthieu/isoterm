@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# This script downloads and executes the latest version of isoterm.
+# This script downloads and executes isoterm.
 # It is designed to be ephemeral, cleaning up after itself.
 #
 # Usage:
@@ -10,14 +10,33 @@
 set -e # Exit immediately if a command exits with a non-zero status.
 
 # --- Configuration ---
+# NOTE: This VERSION placeholder will be replaced by the CI during the release process.
+VERSION="<PLACEHOLDER_VERSION>"
 GITHUB_USER="kodematthieu"
 GITHUB_REPO="isoterm"
-API_URL="https://api.github.com/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest"
+LATEST_API_URL="https://api.github.com/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/latest"
+TAG_API_URL_TEMPLATE="https://api.github.com/repos/${GITHUB_USER}/${GITHUB_REPO}/releases/tags/${VERSION}"
+
+# --- Helper Functions ---
+get_latest_tag() {
+    # Fetches the tag name of the latest release.
+    curl -s "$LATEST_API_URL" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
+}
 
 # --- Platform Detection ---
 get_platform() {
   os=$(uname -s | tr '[:upper:]' '[:lower:]')
   arch=$(uname -m)
+
+  # Termux on Android detection (must come before generic Linux)
+  if [ -n "$TERMUX_VERSION" ]; then
+    case "$arch" in
+      aarch64) target="aarch64-linux-android" ;;
+      *) echo "Error: Unsupported architecture ($arch) for Termux." >&2; exit 1 ;;
+    esac
+    echo "$target"
+    return
+  fi
 
   case "$os" in
     linux)
@@ -44,15 +63,41 @@ get_platform() {
 
 # --- Main Logic ---
 main() {
+  api_url="$TAG_API_URL_TEMPLATE"
+  release_source_msg="release '$VERSION'"
+
+  # Check if a newer version exists, but only if the script is versioned.
+  if [ "$VERSION" != "<PLACEHOLDER_VERSION>" ]; then
+    latest_tag=$(get_latest_tag)
+    if [ "$VERSION" != "$latest_tag" ]; then
+      echo "Note: This setup script is for version '$VERSION', but the latest version is '$latest_tag'."
+      printf "Would you like to download the latest version instead? [y/N] "
+      read -r response
+      case "$response" in
+          [yY][eE][sS]|[yY])
+              api_url="$LATEST_API_URL"
+              release_source_msg="latest release '$latest_tag'"
+              ;;
+          *)
+              # Default is 'No', continue with the script's version
+              ;;
+      esac
+    fi
+  else
+    # Fallback for unversioned/local script: always use latest.
+    api_url="$LATEST_API_URL"
+    release_source_msg="latest release"
+  fi
+
   target=$(get_platform)
   echo "Platform detected: $target"
+  echo "Fetching release information from $release_source_msg..."
 
-  # Find download URL for the target asset
-  echo "Fetching latest release information..."
-  download_url=$(curl -s "$API_URL" | grep "browser_download_url.*${target}\\.tar\\.gz" | cut -d '"' -f 4 | head -n 1)
+  # Find download URL for the target asset from the selected API endpoint
+  download_url=$(curl -s "$api_url" | grep "browser_download_url.*${target}\\.tar\\.gz" | cut -d '"' -f 4 | head -n 1)
 
   if [ -z "$download_url" ]; then
-    echo "Error: Could not find a release asset for your platform ($target)." >&2
+    echo "Error: Could not find a release asset for your platform ($target) in $release_source_msg." >&2
     echo "Please check the releases page: https://github.com/${GITHUB_USER}/${GITHUB_REPO}/releases" >&2
     exit 1
   fi
