@@ -70,17 +70,29 @@ main() {
   if [ "$VERSION" != "<PLACEHOLDER_VERSION>" ]; then
     latest_tag=$(get_latest_tag)
     if [ "$VERSION" != "$latest_tag" ]; then
-      echo "Note: This setup script is for version '$VERSION', but the latest version is '$latest_tag'."
-      printf "Would you like to download the latest version instead? [y/N] "
+      # Check if VERSION contains a hyphen to identify it as a pre-release
+      case "$VERSION" in
+        *-*)
+          # It's a pre-release
+          echo "Note: This setup script is for pre-release version '$VERSION', but the latest stable version is '$latest_tag'."
+          printf "Would you like to download the latest stable version instead? [y/N] "
+          ;;
+        *)
+          # It's an older stable version
+          echo "Note: This setup script is for an older version '$VERSION', but the latest version is '$latest_tag'."
+          printf "Would you like to download the latest version instead? [y/N] "
+          ;;
+      esac
+
       read -r response
       case "$response" in
-          [yY][eE][sS]|[yY])
-              api_url="$LATEST_API_URL"
-              release_source_msg="latest release '$latest_tag'"
-              ;;
-          *)
-              # Default is 'No', continue with the script's version
-              ;;
+        [yY][eE][sS]|[yY])
+          api_url="$LATEST_API_URL"
+          release_source_msg="latest release '$latest_tag'"
+          ;;
+        *)
+          # Default is 'No', continue with the script's version
+          ;;
       esac
     fi
   else
