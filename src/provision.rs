@@ -128,7 +128,7 @@ impl Fish {
         let mut archive = Archive::new(tar);
         extract_archive(&mut archive, &fish_runtime_dir)?;
 
-        let binary_path_in_archive = fish_runtime_dir.join("bin").join(Self::BINARY_NAME);
+        let binary_path_in_archive = fish_runtime_dir.join(Self::BINARY_NAME);
         create_symlink(&binary_path_in_archive, &tool_path_in_env)?;
 
         // --- Fish-specific 'share' directory provisioning ---
