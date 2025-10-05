@@ -56,6 +56,11 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
     tracing::debug!("debug log from run_inner");
     tracing::info!("info log from run_inner");
 
+    let client = reqwest::Client::builder()
+        .user_agent("isoterm")
+        .build()
+        .context("Failed to build reqwest client")?;
+
     // Expand the user-provided path.
     let dest_dir_str = shellexpand::tilde(&cli.dest_dir).to_string();
     let env_dir = PathBuf::from(dest_dir_str);
@@ -118,7 +123,7 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
     ];
 
     // --- Main Transactional Block ---
-    if let Err(e) = setup_environment(&env_dir, &tools, &mp, &spinner_style).await {
+    if let Err(e) = setup_environment(&env_dir, &tools, &mp, &spinner_style, &client).await {
         eprintln!(
             "\n{} {}",
             style("Fatal:").red().bold(),
@@ -157,6 +162,7 @@ async fn setup_environment(
     tools: &[Tool],
     mp: &MultiProgress,
     spinner_style: &ProgressStyle,
+    client: &reqwest::Client,
 ) -> AppResult<()> {
     // --- Create environment directories ---
     let bin_dir = env_dir.join("bin");
@@ -188,9 +194,10 @@ async fn setup_environment(
     for (tool, pb) in tools.iter().cloned().zip(progress_bars.into_iter()) {
         let env_dir = env_dir.to_path_buf();
         let spinner_style = spinner_style.clone();
+        let client = client.clone();
 
         let task = tokio::spawn(async move {
-            provision::provision_tool(&env_dir, &tool, &pb, &spinner_style)
+            provision::provision_tool(&env_dir, &tool, &pb, &spinner_style, &client)
                 .await
                 .with_context(|| format!("Failed to provision tool: '{}'", tool.name))
         });

@@ -90,6 +90,7 @@ pub async fn provision_tool(
     tool: &Tool,
     pb: &ProgressBar,
     spinner_style: &ProgressStyle,
+    client: &reqwest::Client,
 ) -> AppResult<()> {
     pb.set_message(format!("Provisioning {}...", style(tool.name).bold()));
 
@@ -108,7 +109,7 @@ pub async fn provision_tool(
         if tool.needs_source_share {
             let fish_runtime_dir = env_dir.join("fish_runtime");
             if !fish_runtime_dir.join("share").exists() {
-                provision_source_share(&fish_runtime_dir, tool, pb).await?;
+                provision_source_share(&fish_runtime_dir, tool, pb, client).await?;
             } else {
                 tracing::debug!("'share' directory already exists, skipping download.");
             }
@@ -145,9 +146,9 @@ pub async fn provision_tool(
     }
 
     let download_result = if tool.path_in_archive.is_some() {
-        download_and_install_archive(env_dir, tool, pb, spinner_style).await
+        download_and_install_archive(env_dir, tool, pb, spinner_style, client).await
     } else {
-        download_and_install_binary(env_dir, tool, pb, spinner_style).await
+        download_and_install_binary(env_dir, tool, pb, spinner_style, client).await
     };
 
     if let Err(e) = download_result {
@@ -163,7 +164,7 @@ pub async fn provision_tool(
     if tool.needs_source_share {
         let fish_runtime_dir = env_dir.join("fish_runtime");
         if !fish_runtime_dir.join("share").exists() {
-            provision_source_share(&fish_runtime_dir, tool, pb).await?;
+            provision_source_share(&fish_runtime_dir, tool, pb, client).await?;
         } else {
             tracing::debug!("'share' directory already exists, skipping download.");
         }
@@ -183,6 +184,7 @@ async fn download_to_temp_file(
     url: &str,
     asset_name: &str,
     pb: &ProgressBar,
+    client: &reqwest::Client,
 ) -> AppResult<NamedTempFile> {
     let retry_strategy = ExponentialBackoff::from_millis(500).map(jitter).take(3);
 
@@ -190,7 +192,9 @@ async fn download_to_temp_file(
         // Reset progress bar on each attempt
         pb.set_position(0);
 
-        let response = reqwest::get(url)
+        let response = client
+            .get(url)
+            .send()
             .await
             .map_err(|e| e.to_string())?
             .error_for_status()
@@ -229,15 +233,17 @@ async fn download_and_install_binary(
     tool: &Tool,
     pb: &ProgressBar,
     spinner_style: &ProgressStyle,
+    client: &reqwest::Client,
 ) -> AppResult<()> {
     let (download_url, asset_name) = find_github_release_asset_url(
         tool,
         "https://api.github.com",
         env::consts::OS,
         env::consts::ARCH,
+        client,
     )
     .await?;
-    let temp_file = download_to_temp_file(&download_url, &asset_name, pb).await?;
+    let temp_file = download_to_temp_file(&download_url, &asset_name, pb, client).await?;
 
     pb.set_style(spinner_style.clone());
     pb.set_message(format!("Extracting {}...", style(tool.binary_name).bold()));
@@ -270,15 +276,17 @@ async fn download_and_install_archive(
     tool: &Tool,
     pb: &ProgressBar,
     spinner_style: &ProgressStyle,
+    client: &reqwest::Client,
 ) -> AppResult<()> {
     let (download_url, asset_name) = find_github_release_asset_url(
         tool,
         "https://api.github.com",
         env::consts::OS,
         env::consts::ARCH,
+        client,
     )
     .await?;
-    let temp_file = download_to_temp_file(&download_url, &asset_name, pb).await?;
+    let temp_file = download_to_temp_file(&download_url, &asset_name, pb, client).await?;
     let file = temp_file.reopen()?;
 
     pb.set_style(spinner_style.clone());
@@ -322,8 +330,13 @@ async fn download_and_install_archive(
     Ok(())
 }
 
-#[tracing::instrument(skip(pb), fields(tool = tool.name, dest_dir = %dest_dir.display()))]
-async fn provision_source_share(dest_dir: &Path, tool: &Tool, pb: &ProgressBar) -> AppResult<()> {
+#[tracing::instrument(skip(pb, client), fields(tool = tool.name, dest_dir = %dest_dir.display()))]
+async fn provision_source_share(
+    dest_dir: &Path,
+    tool: &Tool,
+    pb: &ProgressBar,
+    client: &reqwest::Client,
+) -> AppResult<()> {
     pb.set_message(format!(
         "Downloading {} source for 'share' dir...",
         style(tool.name).bold()
@@ -331,10 +344,10 @@ async fn provision_source_share(dest_dir: &Path, tool: &Tool, pb: &ProgressBar) 
 
     // 1. Get the source tarball URL
     let (source_url, asset_name) =
-        find_github_source_tarball_url(tool, "https://api.github.com").await?;
+        find_github_source_tarball_url(tool, "https://api.github.com", client).await?;
 
     // 2. Download to a temp file
-    let temp_file = download_to_temp_file(&source_url, &asset_name, pb).await?;
+    let temp_file = download_to_temp_file(&source_url, &asset_name, pb, client).await?;
     let mut file = temp_file.reopen()?;
 
     // 3. Selectively extract the 'share' directory
@@ -347,20 +360,17 @@ async fn provision_source_share(dest_dir: &Path, tool: &Tool, pb: &ProgressBar) 
     Ok(())
 }
 
-#[tracing::instrument(fields(repo = tool.repo))]
+#[tracing::instrument(skip(client), fields(repo = tool.repo))]
 async fn find_github_source_tarball_url(
     tool: &Tool,
     base_url: &str,
+    client: &reqwest::Client,
 ) -> AppResult<(String, String)> {
     let retry_strategy = ExponentialBackoff::from_millis(500).map(jitter).take(3);
 
     let result = Retry::spawn(retry_strategy, || async {
         let repo_url = format!("{}/repos/{}/releases/latest", base_url, tool.repo);
         tracing::debug!(url = %repo_url, "Fetching latest release from GitHub API");
-        let client = reqwest::Client::builder()
-            .user_agent("isoterm")
-            .build()
-            .map_err(|e| e.to_string())?;
 
         let response: Value = client
             .get(&repo_url)
@@ -391,22 +401,19 @@ async fn find_github_source_tarball_url(
     result.map_err(|e: String| anyhow!(e))
 }
 
-#[tracing::instrument(fields(repo = tool.repo, os = os, arch = arch))]
+#[tracing::instrument(skip(client), fields(repo = tool.repo, os = os, arch = arch))]
 async fn find_github_release_asset_url(
     tool: &Tool,
     base_url: &str,
     os: &str,
     arch: &str,
+    client: &reqwest::Client,
 ) -> AppResult<(String, String)> {
     let retry_strategy = ExponentialBackoff::from_millis(500).map(jitter).take(3);
 
     let result = Retry::spawn(retry_strategy, || async {
         let repo_url = format!("{}/repos/{}/releases/latest", base_url, tool.repo);
         tracing::debug!(url = %repo_url, "Fetching latest release from GitHub API");
-        let client = reqwest::Client::builder()
-            .user_agent("isoterm")
-            .build()
-            .map_err(|e| e.to_string())?;
 
         let response: Value = client
             .get(&repo_url)
@@ -801,8 +808,11 @@ mod tests {
             needs_source_share: false,
         };
 
+        let client = reqwest::Client::new(); // Create a client for the test
+
         let (url, name) =
-            find_github_release_asset_url(&tool, &mock_server.uri(), "linux", "x86_64").await?;
+            find_github_release_asset_url(&tool, &mock_server.uri(), "linux", "x86_64", &client)
+                .await?;
 
         // This assertion will fail with the buggy logic but pass with the fix.
         assert_eq!(
