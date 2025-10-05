@@ -4,6 +4,7 @@ use console::style;
 use indicatif::ProgressBar;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 /// Generates all necessary configuration files and the activation script.
 #[tracing::instrument(skip(pb), fields(env_dir = %env_dir.display()))]
@@ -66,13 +67,29 @@ fn write_fish_config(env_dir: &Path) -> AppResult<()> {
     Ok(())
 }
 
-/// Creates a default `starship.toml` configuration.
+/// Creates a default `starship.toml` configuration using `starship preset`.
 #[tracing::instrument(fields(env_dir = %env_dir.display()))]
 fn write_starship_config(env_dir: &Path) -> AppResult<()> {
     let config_path = env_dir.join("config").join("starship.toml");
-    let config_content = include_str!("../templates/starship.toml");
-    tracing::trace!(path = %config_path.display(), "Writing starship config");
-    fs::write(&config_path, config_content).context("Failed to write starship.toml")?;
+    let starship_bin = env_dir.join("bin").join("starship");
+
+    tracing::trace!(path = %config_path.display(), "Generating starship config");
+
+    let status = Command::new(&starship_bin)
+        .arg("preset")
+        .arg("no-empty-icons")
+        .arg("-o")
+        .arg(&config_path)
+        .status()
+        .context("Failed to execute starship preset command")?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "starship preset command failed with status: {}",
+            status
+        ));
+    }
+
     Ok(())
 }
 
