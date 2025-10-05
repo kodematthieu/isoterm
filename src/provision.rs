@@ -169,6 +169,12 @@ pub async fn provision_tool(
         }
     }
 
+    pb.finish_with_message(format!(
+        "{} {} provisioned successfully",
+        style("✓").green(),
+        style(tool.name).bold()
+    ));
+
     Ok(())
 }
 
@@ -255,12 +261,6 @@ async fn download_and_install_binary(
         fs::set_permissions(&tool_path, fs::Permissions::from_mode(0o755))?;
     }
 
-    pb.finish_with_message(format!(
-        "{} Installed {} to {}",
-        style("✓").green(),
-        style(tool.name).bold(),
-        style(tool_path.display()).cyan()
-    ));
     Ok(())
 }
 
