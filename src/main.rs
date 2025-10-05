@@ -141,7 +141,7 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
 
 /// Encapsulates the entire environment setup process. If any step fails,
 /// it returns an error, allowing the caller to perform a cleanup.
-#[tracing::instrument(skip(env_dir, tools, mp, spinner_style))]
+#[tracing::instrument(skip(tools, mp, spinner_style), fields(env_dir = %env_dir.display()))]
 async fn setup_environment(
     env_dir: &Path,
     tools: &[Tool],
@@ -149,9 +149,18 @@ async fn setup_environment(
     spinner_style: &ProgressStyle,
 ) -> AppResult<()> {
     // Create environment directories.
-    fs::create_dir_all(env_dir.join("bin"))?;
-    fs::create_dir_all(env_dir.join("config"))?;
-    fs::create_dir_all(env_dir.join("data"))?;
+    let bin_dir = env_dir.join("bin");
+    fs::create_dir_all(&bin_dir)?;
+    tracing::trace!(path = %bin_dir.display(), "Created bin directory");
+
+    let config_dir = env_dir.join("config");
+    fs::create_dir_all(&config_dir)?;
+    tracing::trace!(path = %config_dir.display(), "Created config directory");
+
+    let data_dir = env_dir.join("data");
+    fs::create_dir_all(&data_dir)?;
+    tracing::trace!(path = %data_dir.display(), "Created data directory");
+
 
     // --- Provisioning Loop ---
     for tool in tools {

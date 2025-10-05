@@ -1,18 +1,63 @@
-use std::process::Command;
+use std::fs;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::thread;
+use tempfile::tempdir;
 
 fn run_isoterm_with_args(args: &[&str]) -> (String, String) {
     let bin_path = env!("CARGO_BIN_EXE_isoterm");
-    let output = Command::new(bin_path)
+    let dest_dir_temp = tempdir().expect("Failed to create temp dir");
+    let dest_dir = dest_dir_temp.path();
+    let bin_dir = dest_dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("Failed to create test bin dir");
+
+    // Pre-create dummy tool files to prevent the app from trying to download them.
+    let dummy_tools = ["fish", "starship", "zoxide", "atuin", "rg", "hx"];
+    for tool in &dummy_tools {
+        let tool_path = bin_dir.join(tool);
+        fs::write(&tool_path, "").expect("Failed to create dummy tool file");
+        // On Unix, make the dummy file executable to mimic a real binary.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&tool_path, fs::Permissions::from_mode(0o755))
+                .expect("Failed to set permissions on dummy tool");
+        }
+    }
+
+    let mut child = Command::new(bin_path)
         .args(args)
-        // Set a dummy dest_dir to avoid cluttering the user's home directory
-        .args(&["/tmp/isoterm-test-env"])
-        .output()
+        .args(&[dest_dir.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("Failed to execute command");
 
-    let stdout = String::from_utf8(output.stdout).expect("Failed to read stdout");
-    let stderr = String::from_utf8(output.stderr).expect("Failed to read stderr");
+    let mut stdout_pipe = child.stdout.take().unwrap();
+    let mut stderr_pipe = child.stderr.take().unwrap();
 
-    (stdout, stderr)
+    let stdout_thread = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        stdout_pipe
+            .read_to_end(&mut buffer)
+            .expect("Failed to read from stdout");
+        String::from_utf8(buffer).expect("Failed to parse stdout")
+    });
+
+    let stderr_thread = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        stderr_pipe
+            .read_to_end(&mut buffer)
+            .expect("Failed to read from stderr");
+        String::from_utf8(buffer).expect("Failed to parse stderr")
+    });
+
+    child.wait().expect("Child process failed to exit");
+
+    let stdout_str = stdout_thread.join().unwrap();
+    let stderr_str = stderr_thread.join().unwrap();
+
+    (stdout_str, stderr_str)
 }
 
 #[test]

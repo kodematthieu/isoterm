@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 
 /// Generates all necessary configuration files and the activation script.
-#[tracing::instrument(skip(env_dir, pb))]
+#[tracing::instrument(skip(pb), fields(env_dir = %env_dir.display()))]
 pub async fn generate_configs(env_dir: &Path, pb: &ProgressBar) -> AppResult<()> {
     pb.set_message("Generating configuration files...");
 
@@ -36,10 +36,11 @@ pub async fn generate_configs(env_dir: &Path, pb: &ProgressBar) -> AppResult<()>
 }
 
 /// Creates the main `activate.sh` script for the environment.
-#[tracing::instrument(skip(env_dir))]
+#[tracing::instrument(fields(env_dir = %env_dir.display()))]
 fn write_activate_script(env_dir: &Path) -> AppResult<()> {
     let script_content = include_str!("../templates/activate.sh");
     let script_path = env_dir.join("activate.sh");
+    tracing::trace!(path = %script_path.display(), "Writing activate script");
     fs::write(&script_path, script_content).context("Failed to write activate.sh")?;
 
     #[cfg(unix)]
@@ -52,7 +53,7 @@ fn write_activate_script(env_dir: &Path) -> AppResult<()> {
 }
 
 /// Creates the `config.fish` file with initialization commands.
-#[tracing::instrument(skip(env_dir))]
+#[tracing::instrument(fields(env_dir = %env_dir.display()))]
 fn write_fish_config(env_dir: &Path) -> AppResult<()> {
     let fish_config_dir = env_dir.join("config").join("fish");
     fs::create_dir_all(&fish_config_dir).context("Failed to create fish config directory")?;
@@ -60,21 +61,23 @@ fn write_fish_config(env_dir: &Path) -> AppResult<()> {
     let config_content = include_str!("../templates/config.fish");
 
     let config_path = fish_config_dir.join("config.fish");
-    fs::write(config_path, config_content).context("Failed to write config.fish")?;
+    tracing::trace!(path = %config_path.display(), "Writing fish config");
+    fs::write(&config_path, config_content).context("Failed to write config.fish")?;
     Ok(())
 }
 
 /// Creates a default `starship.toml` configuration.
-#[tracing::instrument(skip(env_dir))]
+#[tracing::instrument(fields(env_dir = %env_dir.display()))]
 fn write_starship_config(env_dir: &Path) -> AppResult<()> {
     let config_path = env_dir.join("config").join("starship.toml");
     let config_content = include_str!("../templates/starship.toml");
-    fs::write(config_path, config_content).context("Failed to write starship.toml")?;
+    tracing::trace!(path = %config_path.display(), "Writing starship config");
+    fs::write(&config_path, config_content).context("Failed to write starship.toml")?;
     Ok(())
 }
 
 /// Creates a default `atuin/config.toml` configuration.
-#[tracing::instrument(skip(env_dir))]
+#[tracing::instrument(fields(env_dir = %env_dir.display()))]
 fn write_atuin_config(env_dir: &Path) -> AppResult<()> {
     let atuin_data_dir = env_dir.join("data").join("atuin");
     fs::create_dir_all(&atuin_data_dir).context("Failed to create atuin data directory")?;
@@ -90,23 +93,27 @@ fn write_atuin_config(env_dir: &Path) -> AppResult<()> {
     let atuin_config_dir = env_dir.join("config").join("atuin");
     fs::create_dir_all(&atuin_config_dir)?;
     let config_path = atuin_config_dir.join("config.toml");
-    fs::write(config_path, config_content).context("Failed to write atuin/config.toml")?;
+    tracing::trace!(path = %config_path.display(), "Writing atuin config");
+    fs::write(&config_path, config_content).context("Failed to write atuin/config.toml")?;
 
     Ok(())
 }
 
-#[tracing::instrument(skip(env_dir))]
+#[tracing::instrument(fields(env_dir = %env_dir.display()))]
 fn write_helix_config(env_dir: &Path) -> AppResult<()> {
     let helix_config_dir = env_dir.join("config").join("helix");
     fs::create_dir_all(&helix_config_dir).context("Failed to create helix config directory")?;
 
     let config_toml_path = helix_config_dir.join("config.toml");
     let config_toml_content = include_str!("../templates/helix/config.toml");
-    fs::write(config_toml_path, config_toml_content).context("Failed to write helix/config.toml")?;
+    tracing::trace!(path = %config_toml_path.display(), "Writing helix config.toml");
+    fs::write(&config_toml_path, config_toml_content)
+        .context("Failed to write helix/config.toml")?;
 
     let languages_toml_path = helix_config_dir.join("languages.toml");
     let languages_toml_content = include_str!("../templates/helix/languages.toml");
-    fs::write(languages_toml_path, languages_toml_content)
+    tracing::trace!(path = %languages_toml_path.display(), "Writing helix languages.toml");
+    fs::write(&languages_toml_path, languages_toml_content)
         .context("Failed to write helix/languages.toml")?;
 
     Ok(())

@@ -30,7 +30,7 @@ pub struct Tool {
 }
 
 /// Main provisioning function for a single tool.
-#[tracing::instrument(skip(env_dir, tool, pb, spinner_style))]
+#[tracing::instrument(skip(pb, spinner_style), fields(tool = tool.name, env_dir = %env_dir.display()))]
 pub async fn provision_tool(
     env_dir: &Path,
     tool: &Tool,
@@ -43,6 +43,7 @@ pub async fn provision_tool(
     let tool_path_in_env = bin_dir.join(tool.binary_name);
 
     if tool_path_in_env.exists() {
+        tracing::debug!(path = %tool_path_in_env.display(), "Tool already exists, skipping.");
         pb.finish_with_message(format!(
             "{} {} is already provisioned",
             style("✓").green(),
@@ -51,21 +52,34 @@ pub async fn provision_tool(
         return Ok(());
     }
 
-    if let Ok(system_path) = which::which(tool.binary_name) {
-        pb.set_message(format!(
-            "Found {}, creating symlink...",
-            style(tool.name).bold()
-        ));
-        if create_symlink(&system_path, &tool_path_in_env).is_ok() {
-            pb.finish_with_message(format!(
-                "{} Symlinked {} from {}",
-                style("✓").green(),
-                style(tool.name).bold(),
-                style(system_path.display()).cyan()
+    match which::which(tool.binary_name) {
+        Ok(system_path) => {
+            tracing::debug!(path = %system_path.display(), "Found tool on system");
+            pb.set_message(format!(
+                "Found {}, creating symlink...",
+                style(tool.name).bold()
             ));
-            return Ok(());
+            match create_symlink(&system_path, &tool_path_in_env) {
+                Ok(_) => {
+                    tracing::debug!("Successfully created symlink");
+                    pb.finish_with_message(format!(
+                        "{} Symlinked {} from {}",
+                        style("✓").green(),
+                        style(tool.name).bold(),
+                        style(system_path.display()).cyan()
+                    ));
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "Failed to create symlink, proceeding with download.");
+                }
+            }
+        }
+        Err(_) => {
+            tracing::debug!("Tool not found on system, proceeding with download.");
         }
     }
+
 
     let download_result = if tool.path_in_archive.is_some() {
         download_and_install_archive(env_dir, tool, pb, spinner_style).await
@@ -218,7 +232,7 @@ async fn download_and_install_archive(
     Ok(())
 }
 
-#[tracing::instrument(skip(base_url, os, arch))]
+#[tracing::instrument(fields(repo = tool.repo, os = os, arch = arch))]
 async fn find_github_release_asset_url(
     tool: &Tool,
     base_url: &str,
@@ -226,6 +240,7 @@ async fn find_github_release_asset_url(
     arch: &str,
 ) -> AppResult<(String, String)> {
     let repo_url = format!("{}/repos/{}/releases/latest", base_url, tool.repo);
+    tracing::debug!(url = %repo_url, "Fetching latest release from GitHub API");
     let client = reqwest::Client::builder().user_agent("isoterm").build()?;
 
     let response: Value = client
@@ -240,6 +255,8 @@ async fn find_github_release_asset_url(
     let assets = response["assets"]
         .as_array()
         .ok_or_else(|| anyhow!("No assets found in release for {}", tool.repo))?;
+
+    tracing::debug!(asset_count = assets.len(), "Found release assets");
 
     let os_targets: Vec<&str> = match os {
         "linux" => match tool.name {
@@ -297,11 +314,9 @@ fn extract_tar_gz<R: Read>(reader: R, target_dir: &Path, binary_name: &str) -> A
     let mut archive = Archive::new(tar);
     for entry in archive.entries()? {
         let mut entry = entry?;
-        if entry
-            .path()?
-            .file_name()
-            .map_or(false, |n| n == binary_name)
-        {
+        let path = entry.path()?;
+        tracing::trace!(entry_path = ?path, "Unpacking archive entry");
+        if path.file_name().map_or(false, |n| n == binary_name) {
             entry.unpack(target_dir.join(binary_name))?;
             return Ok(());
         }
@@ -316,6 +331,7 @@ fn extract_archive<R: io::Read>(archive: &mut Archive<R>, target_dir: &Path) -> 
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
         let path = entry.path()?.to_path_buf();
+        tracing::trace!(entry_path = ?path, "Unpacking archive entry");
 
         // If the path has more than one component, it's nested in a top-level directory.
         // In that case, we strip the top-level directory. Otherwise, we use the path as is.
@@ -348,6 +364,7 @@ fn extract_zip_archive<R: io::Read + io::Seek>(
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
         if let Some(enclosed_name) = file.enclosed_name() {
+            tracing::trace!(entry_path = ?enclosed_name, "Unpacking archive entry");
             let stripped_path = enclosed_name
                 .strip_prefix(enclosed_name.components().next().unwrap())
                 .unwrap_or(&enclosed_name);
@@ -381,18 +398,18 @@ fn extract_zip<R: Read + Seek>(
     let mut archive = ZipArchive::new(reader)?;
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
-        if file
-            .enclosed_name()
-            .map_or(false, |p| p.file_name().map_or(false, |n| n == binary_name))
-        {
-            let target_path = target_dir.join(binary_name);
-            let mut outfile = File::create(&target_path)?;
-            io::copy(&mut file, &mut outfile)?;
-            #[cfg(unix)]
-            {
-                fs::set_permissions(&target_path, fs::Permissions::from_mode(0o755))?;
+        if let Some(path) = file.enclosed_name() {
+            tracing::trace!(entry_path = ?path, "Unpacking archive entry");
+            if path.file_name().map_or(false, |n| n == binary_name) {
+                let target_path = target_dir.join(binary_name);
+                let mut outfile = File::create(&target_path)?;
+                io::copy(&mut file, &mut outfile)?;
+                #[cfg(unix)]
+                {
+                    fs::set_permissions(&target_path, fs::Permissions::from_mode(0o755))?;
+                }
+                return Ok(());
             }
-            return Ok(());
         }
     }
     Err(anyhow!(
@@ -402,20 +419,22 @@ fn extract_zip<R: Read + Seek>(
 }
 
 #[cfg(unix)]
-#[tracing::instrument]
+#[tracing::instrument(fields(original = %original.display(), link = %link.display()))]
 fn create_symlink(original: &Path, link: &Path) -> AppResult<()> {
     let link_parent = link.parent().unwrap_or_else(|| Path::new(""));
     let relative_path = pathdiff::diff_paths(original, link_parent)
         .ok_or_else(|| anyhow!("Failed to calculate relative path for symlink"))?;
+    tracing::debug!(relative_path = %relative_path.display(), "Calculated relative path for symlink");
     symlink(relative_path, link).context("Failed to create symlink")
 }
 
 #[cfg(windows)]
-#[tracing::instrument]
+#[tracing::instrument(fields(original = %original.display(), link = %link.display()))]
 fn create_symlink(original: &Path, link: &Path) -> AppResult<()> {
     let link_parent = link.parent().unwrap_or_else(|| Path::new(""));
     let relative_path = pathdiff::diff_paths(original, link_parent)
         .ok_or_else(|| anyhow!("Failed to calculate relative path for symlink"))?;
+    tracing::debug!(relative_path = %relative_path.display(), "Calculated relative path for symlink");
 
     if original.is_dir() {
         symlink_dir(relative_path, link).context("Failed to create directory symlink")
