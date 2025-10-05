@@ -1,18 +1,15 @@
-# Determine the root directory of the isoterm environment.
-# (status --current-filename) gives the path to this script.
-# We navigate up from .../config/fish to the root.
-set -l ISOTERM_ROOT_DIR (dirname (status --current-filename))/../../
-
-# Prepend the portable fish functions directory to the function search path.
-# This is critical for tools like zoxide that need to wrap built-in functions.
-set -p fish_function_path "$ISOTERM_ROOT_DIR/fish_runtime/share/fish/functions"
+set fish_data_dir (string split ':' $XDG_DATA_DIRS)[1]
 
 if status is-interactive
     starship init fish | source
     atuin init fish | source
-    zoxide init fish | source
+    zoxide init fish | string replace --regex \
+        -- '\$__fish_data_dir' $fish_data_dir | source
 end
 
+# ------------------------------------------------------------------------------
+# SESSION HOOKS
+# ------------------------------------------------------------------------------
 function on_exit --on-event fish_exit
     echo "Exiting isolated shell environment."
 end
