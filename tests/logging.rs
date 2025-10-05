@@ -73,39 +73,41 @@ fn run_isoterm_with_args(args: &[&str]) -> (String, String) {
 #[test]
 fn test_logging_no_verbose() {
     let (_stdout, stderr) = run_isoterm_with_args(&[]);
-    assert!(!stderr.contains("info log from run_inner"));
-    assert!(!stderr.contains("debug log from run_inner"));
-    assert!(!stderr.contains("trace log from run_inner"));
+    assert!(!stderr.contains("Starting environment setup"));
+    assert!(!stderr.contains("Tool already exists"));
+    assert!(!stderr.contains("Created bin directory"));
 }
 
 #[test]
 fn test_logging_v() {
     let (_stdout, stderr) = run_isoterm_with_args(&["-v"]);
-    assert!(stderr.contains("info log from run_inner"));
-    assert!(!stderr.contains("debug log from run_inner"));
-    assert!(!stderr.contains("trace log from run_inner"));
+    assert!(stderr.contains("Starting environment setup"));
+    assert!(!stderr.contains("Tool already exists"));
+    assert!(!stderr.contains("Created bin directory"));
 }
 
 #[test]
 fn test_logging_vv() {
     let (_stdout, stderr) = run_isoterm_with_args(&["-vv"]);
-    assert!(stderr.contains("info log from run_inner"));
-    assert!(stderr.contains("debug log from run_inner"));
-    assert!(!stderr.contains("trace log from run_inner"));
+    assert!(stderr.contains("Starting environment setup"));
+    // With -vv, isoterm logs at debug level. The provisioner should log this.
+    assert!(stderr.contains("Tool already exists, skipping binary provisioning."));
+    assert!(!stderr.contains("Created bin directory"));
 }
 
 #[test]
 fn test_logging_vvv() {
     let (_stdout, stderr) = run_isoterm_with_args(&["-vvv"]);
-    assert!(stderr.contains("info log from run_inner"));
-    assert!(stderr.contains("debug log from run_inner"));
-    assert!(stderr.contains("trace log from run_inner"));
+    assert!(stderr.contains("Starting environment setup"));
+    assert!(stderr.contains("Tool already exists, skipping binary provisioning."));
+    // With -vvv, isoterm logs at trace level.
+    assert!(stderr.contains("Created bin directory"));
 }
 
 #[test]
 fn test_logging_vvvv() {
     let (_stdout, stderr) = run_isoterm_with_args(&["-vvvv"]);
-    assert!(stderr.contains("info log from run_inner"));
-    assert!(stderr.contains("debug log from run_inner"));
-    assert!(stderr.contains("trace log from run_inner"));
+    assert!(stderr.contains("Starting environment setup"));
+    assert!(stderr.contains("Tool already exists, skipping binary provisioning."));
+    assert!(stderr.contains("Created bin directory"));
 }
