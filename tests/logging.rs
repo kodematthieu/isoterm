@@ -32,7 +32,6 @@ fn run_isoterm_with_args(args: &[&str]) -> (String, String) {
 
     let mut child = Command::new(bin_path)
         .args(args)
-        .arg("--dest-dir")
         .arg(dest_dir.to_str().unwrap())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -58,14 +57,15 @@ fn run_isoterm_with_args(args: &[&str]) -> (String, String) {
         String::from_utf8(buffer).expect("Failed to parse stderr")
     });
 
-    // Wait for the child to exit FIRST. This ensures that the pipes are closed
-    // and the reader threads won't block indefinitely on `read_to_end`.
-    child.wait().expect("Child process failed to exit");
-
-    // Now that the child process has exited, we can safely join the threads
-    // to collect all the output.
+    // First, join the reader threads to collect all the output. The `join` calls
+    // will block until the child process exits and closes the pipes, at which
+    // point `read_to_end` will return. This is the correct way to avoid a deadlock.
     let stdout_str = stdout_thread.join().unwrap();
     let stderr_str = stderr_thread.join().unwrap();
+
+    // Now that I/O is complete, we can wait for the child process to get its
+    // exit status. This should return immediately.
+    child.wait().expect("Child process failed to exit");
 
     (stdout_str, stderr_str)
 }

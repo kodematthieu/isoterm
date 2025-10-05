@@ -16,7 +16,15 @@ export PATH="$ENV_DIR/bin:$PATH"
 export XDG_CONFIG_HOME="$ENV_DIR/config"
 export XDG_DATA_HOME="$ENV_DIR/data"
 
-# 3. XDG_DATA_DIRS: Prepend the portable fish shell's runtime data directory.
+# 3. HELIX_RUNTIME: Point Helix to its runtime files (themes, grammars).
+#    This is set ONLY if a local runtime directory exists within the env.
+#    If it doesn't exist, the variable is left unset, allowing Helix to
+#    fall back to a user-wide installation (the intended behavior for symlinks).
+if [ -d "$ENV_DIR/helix/runtime" ]; then
+  export HELIX_RUNTIME="$ENV_DIR/helix/runtime"
+fi
+
+# 4. XDG_DATA_DIRS: Prepend the portable fish shell's runtime data directory.
 #    This is distinct from XDG_DATA_HOME and is critical for allowing fish
 #    to find its standard library functions and completions.
 FISH_RUNTIME_DATA_DIR="$ENV_DIR/fish_runtime/share"
@@ -27,7 +35,7 @@ else
   export XDG_DATA_DIRS="$FISH_RUNTIME_DATA_DIR:/usr/local/share:/usr/share"
 fi
 
-# 4. Execute fish: Replace the current shell process with fish.
+# 5. Execute fish: Replace the current shell process with fish.
 #    The `-C` flag executes a command, in this case sourcing our custom config,
 #    which will be located at $XDG_CONFIG_HOME/fish/config.fish.
 exec "$ENV_DIR/bin/fish" -l -C "source '$XDG_CONFIG_HOME/fish/config.fish'"

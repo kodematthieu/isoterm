@@ -1,5 +1,5 @@
 use crate::error::AppResult;
-use anyhow::{Context, anyhow};
+use anyhow::{anyhow, Context};
 use console::style;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
@@ -7,14 +7,15 @@ use indicatif::{ProgressBar, ProgressStyle};
 use pathdiff;
 use regex::Regex;
 use serde_json::Value;
+use shellexpand;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use tar::Archive;
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempPath};
 use tokio_retry::Retry;
 use tokio_retry::strategy::{ExponentialBackoff, jitter};
 use xz2::read::XzDecoder;
@@ -81,6 +82,7 @@ pub struct Tool {
     pub binary_name: &'static str,
     pub path_in_archive: Option<&'static str>,
     pub needs_source_share: bool,
+    pub version_arg: Option<&'static str>,
 }
 
 /// Main provisioning function for a single tool.
@@ -133,6 +135,39 @@ pub async fn provision_tool(
                         style(tool.name).bold(),
                         style(system_path.display()).cyan()
                     ));
+
+                    // Post-symlink logic for specific tools like Helix
+                    if tool.name == "helix" {
+                        let user_helix_runtime_dir =
+                            shellexpand::tilde("~/.config/helix/runtime").to_string();
+                        let user_runtime_path = Path::new(&user_helix_runtime_dir);
+
+                        if !user_runtime_path.exists() {
+                            tracing::debug!(
+                                "User-wide helix runtime not found. Provisioning a local one."
+                            );
+                            pb.set_message(
+                                "Detected Helix symlink, provisioning matching runtime...",
+                            );
+
+                            // This is a blocking operation (network + file IO), so we
+                            // spawn it on a blocking thread to avoid starving the async runtime.
+                            let env_dir_clone = env_dir.to_path_buf();
+                            let client_clone = client.clone();
+                            let pb_clone = pb.clone();
+                            tokio::task::spawn_blocking(move || {
+                                provision_helix_runtime_for_symlink(
+                                    &system_path,
+                                    &env_dir_clone,
+                                    &client_clone,
+                                    &pb_clone,
+                                )
+                            })
+                            .await
+                            .context("Task for provisioning helix runtime panicked")??;
+                        }
+                    }
+
                     return Ok(());
                 }
                 Err(e) => {
@@ -707,6 +742,261 @@ fn extract_share_from_tar_gz<R: Read>(reader: R, target_dir: &Path) -> AppResult
 
     Ok(())
 }
+
+/// For a symlinked Helix, provisions a local runtime if the user-wide one is missing.
+#[tracing::instrument(skip(system_hx_path, env_dir, client, pb))]
+fn provision_helix_runtime_for_symlink(
+    system_hx_path: &Path,
+    env_dir: &Path,
+    client: &reqwest::Client,
+    pb: &ProgressBar,
+) -> AppResult<()> {
+    // 1. Get Helix version from the system binary.
+    let version_output = get_binary_version(system_hx_path, "--version")?;
+    let version_tag = parse_helix_version_tag(&version_output)?;
+    tracing::debug!(version = %version_tag, "Parsed helix version from symlinked binary");
+
+    // 2. Find the GitHub release asset URL for that specific tag.
+    let (download_url, asset_name) = find_github_release_asset_url_by_tag(
+        "helix-editor/helix",
+        &version_tag,
+        env::consts::OS,
+        env::consts::ARCH,
+        "https://api.github.com",
+        client,
+    )?;
+
+    // 3. Download the archive to a temp file.
+    let temp_file = download_to_temp_file_blocking(&download_url, &asset_name, pb, client)?;
+
+    // 4. Selectively extract ONLY the `runtime` directory.
+    let helix_dir = env_dir.join("helix");
+    fs::create_dir_all(&helix_dir)?;
+    tracing::debug!(path = %helix_dir.display(), "Ensured helix directory exists");
+
+    let file = temp_file.reopen()?;
+    if asset_name.ends_with(".tar.xz") {
+        let tar = XzDecoder::new(file);
+        let mut archive = Archive::new(tar);
+        extract_runtime_from_archive(&mut archive, &helix_dir)?;
+    } else if asset_name.ends_with(".zip") {
+        let mut zip = ZipArchive::new(file)?;
+        extract_runtime_from_zip_archive(&mut zip, &helix_dir)?;
+    } else {
+        return Err(anyhow!(
+            "Unsupported archive format for Helix runtime: {}",
+            asset_name
+        ));
+    }
+
+    tracing::info!("Successfully provisioned local Helix runtime.");
+    Ok(())
+}
+
+/// Executes a binary with a given argument to get its version string.
+fn get_binary_version(path: &Path, arg: &str) -> AppResult<String> {
+    let output = Command::new(path)
+        .arg(arg)
+        .output()
+        .with_context(|| format!("Failed to execute binary: {}", path.display()))?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "Failed to get version from {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+/// Parses the Helix version tag (e.g., "24.03") from the command output.
+fn parse_helix_version_tag(version_output: &str) -> AppResult<String> {
+    let re = Regex::new(r"helix (\d+\.\d+)")?;
+    let caps = re.captures(version_output).ok_or_else(|| {
+        anyhow!(
+            "Failed to parse Helix version from output: '{}'",
+            version_output
+        )
+    })?;
+    Ok(caps.get(1).unwrap().as_str().to_string())
+}
+
+/// Downloads a file in a blocking context.
+fn download_to_temp_file_blocking(
+    url: &str,
+    asset_name: &str,
+    pb: &ProgressBar,
+    client: &reqwest::Client,
+) -> AppResult<NamedTempFile> {
+    pb.set_position(0);
+
+    let mut response = reqwest::blocking::Client::builder()
+        .user_agent("isoterm")
+        .build()?
+        .get(url)
+        .send()?
+        .error_for_status()?;
+
+    let total_size = response.content_length().unwrap_or(0);
+
+    let download_style = ProgressStyle::with_template(
+        "{spinner:.green} {msg}\n{wide_bar:.cyan/blue} {bytes}/{total_bytes} ({eta})",
+    )?
+    .progress_chars("#>-");
+
+    pb.set_style(download_style);
+    pb.set_length(total_size);
+    pb.set_message(format!("Downloading {}", style(asset_name).cyan()));
+
+    let mut temp_file = NamedTempFile::new()?;
+    let mut buffer = [0; 8192]; // 8KB buffer
+
+    loop {
+        let bytes_read = response.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        temp_file.write_all(&buffer[..bytes_read])?;
+        pb.inc(bytes_read as u64);
+    }
+
+    Ok(temp_file)
+}
+
+/// Finds a GitHub release asset URL for a specific version tag.
+#[tracing::instrument(skip(client), fields(repo = repo, tag = tag, os = os, arch = arch))]
+fn find_github_release_asset_url_by_tag(
+    repo: &str,
+    tag: &str,
+    os: &str,
+    arch: &str,
+    base_url: &str,
+    client: &reqwest::Client,
+) -> AppResult<(String, String)> {
+    let repo_url = format!("{}/repos/{}/releases/tags/{}", base_url, repo, tag);
+    tracing::debug!(url = %repo_url, "Fetching release by tag from GitHub API");
+
+    let response: Value = reqwest::blocking::Client::new()
+        .get(&repo_url)
+        .header("User-Agent", "isoterm")
+        .send()?
+        .error_for_status()?
+        .json()?;
+
+    let assets = response["assets"].as_array().ok_or_else(|| {
+        anyhow!(
+            "No assets found in release {} for {}. The release might be empty or the API response changed.",
+            tag, repo
+        )
+    })?;
+
+    let os_targets: Vec<&str> = match os {
+        "linux" => vec!["linux"],
+        "macos" => vec!["apple-darwin"],
+        "windows" => vec!["pc-windows-msvc"],
+        _ => return Err(anyhow!("Unsupported OS for Helix runtime: {}", os)),
+    };
+
+    let ext = match os {
+        "linux" => "tar.xz",
+        "macos" | "windows" => "zip",
+        _ => return Err(anyhow!("Unsupported OS for Helix runtime: {}", os)),
+    };
+
+    for os_target in &os_targets {
+        let fragments_to_use = vec!["helix", tag, arch, *os_target, ext];
+        tracing::debug!(fragments = ?fragments_to_use, "Searching for asset");
+
+        for asset in assets {
+            let name = asset["name"].as_str().unwrap_or("");
+            let lower_name = name.to_lowercase();
+
+            if fragments_to_use
+                .iter()
+                .all(|frag| lower_name.contains(&frag.to_lowercase()))
+            {
+                if let Some(url) = asset["browser_download_url"].as_str() {
+                    tracing::info!(asset = name, "Found matching release asset");
+                    return Ok((url.to_string(), name.to_string()));
+                }
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "Could not find a matching Helix runtime release asset for tag {} on {} {}",
+        tag,
+        os,
+        arch
+    ))
+}
+
+/// Selectively extracts only the `runtime/` directory from a tar archive.
+fn extract_runtime_from_archive<R: io::Read>(
+    archive: &mut Archive<R>,
+    target_dir: &Path,
+) -> AppResult<()> {
+    for entry_result in archive.entries()? {
+        let mut entry = entry_result?;
+        let path = entry.path()?;
+
+        // Check if the entry is within the 'runtime' directory.
+        // e.g., "helix-24.03-x86_64-linux/runtime/themes/catppuccin.toml"
+        if let Some(runtime_index) = path.to_str().and_then(|s| s.find("/runtime/")) {
+            // Get the path relative to the top-level folder inside the archive.
+            // e.g., "runtime/themes/catppuccin.toml"
+            let relative_path_str = &path.to_str().unwrap()[runtime_index + 1..];
+            let relative_path = Path::new(relative_path_str);
+
+            let outpath = target_dir.join(relative_path);
+
+            if let Some(p) = outpath.parent() {
+                if !p.exists() {
+                    fs::create_dir_all(p)?;
+                }
+            }
+            entry.unpack(&outpath)?;
+        }
+    }
+    Ok(())
+}
+
+/// Selectively extracts only the `runtime/` directory from a zip archive.
+fn extract_runtime_from_zip_archive<R: io::Read + io::Seek>(
+    archive: &mut ZipArchive<R>,
+    target_dir: &Path,
+) -> AppResult<()> {
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        if let Some(enclosed_name) = file.enclosed_name() {
+            if let Some(runtime_index) = enclosed_name.to_str().and_then(|s| s.find("/runtime/")) {
+                let relative_path_str = &enclosed_name.to_str().unwrap()[runtime_index + 1..];
+                let relative_path = Path::new(relative_path_str);
+                let outpath = target_dir.join(relative_path);
+
+                if file.name().ends_with('/') {
+                    fs::create_dir_all(&outpath)?;
+                } else {
+                    if let Some(p) = outpath.parent() {
+                        if !p.exists() {
+                            fs::create_dir_all(p)?;
+                        }
+                    }
+                    let mut outfile = fs::File::create(&outpath)?;
+                    io::copy(&mut file, &mut outfile)?;
+                }
+                 #[cfg(unix)]
+                if let Some(mode) = file.unix_mode() {
+                    fs::set_permissions(&outpath, fs::Permissions::from_mode(mode))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 
 #[cfg(test)]
 mod tests {

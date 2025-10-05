@@ -10,7 +10,7 @@ use anyhow::Context;
 use clap::Parser;
 use console::style;
 use futures::future::try_join_all;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle, ProgressDrawTarget};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -44,6 +44,7 @@ async fn run() -> AppResult<()> {
         };
         tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .with_ansi(console::user_attended())
             .with_writer(std::io::stderr) // Write logs to stderr to not interfere with UI
             .init();
     }
@@ -52,10 +53,6 @@ async fn run() -> AppResult<()> {
 }
 
 async fn run_inner(cli: Cli) -> AppResult<()> {
-    tracing::trace!("trace log from run_inner");
-    tracing::debug!("debug log from run_inner");
-    tracing::info!("info log from run_inner");
-
     let client = reqwest::Client::builder()
         .user_agent("isoterm")
         .build()
@@ -66,7 +63,14 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
     let env_dir = PathBuf::from(dest_dir_str);
 
     // --- UI Setup ---
-    let mp = MultiProgress::new();
+    // Conditionally hide the progress bars if not in a TTY. This is crucial
+    // for CI environments and for ensuring that logs are not overwritten.
+    let draw_target = if console::user_attended() {
+        ProgressDrawTarget::stderr()
+    } else {
+        ProgressDrawTarget::hidden()
+    };
+    let mp = MultiProgress::with_draw_target(draw_target);
     let spinner_style =
         ProgressStyle::with_template("{spinner:.green} {msg}")?.tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏-");
 
@@ -76,6 +80,11 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
         style(env_dir.display()).cyan()
     ))?;
 
+    // Emit logs after the initial UI setup to prevent them from being overwritten.
+    tracing::trace!("trace log from run_inner");
+    tracing::debug!("debug log from run_inner");
+    tracing::info!("info log from run_inner");
+
     // Define the list of tools to be provisioned.
     let tools = vec![
         Tool {
@@ -84,6 +93,7 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
             binary_name: "fish",
             path_in_archive: None,
             needs_source_share: true,
+            version_arg: None,
         },
         Tool {
             name: "starship",
@@ -91,6 +101,7 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
             binary_name: "starship",
             path_in_archive: None,
             needs_source_share: false,
+            version_arg: None,
         },
         Tool {
             name: "zoxide",
@@ -98,6 +109,7 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
             binary_name: "zoxide",
             path_in_archive: None,
             needs_source_share: false,
+            version_arg: None,
         },
         Tool {
             name: "atuin",
@@ -105,6 +117,7 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
             binary_name: "atuin",
             path_in_archive: None,
             needs_source_share: false,
+            version_arg: None,
         },
         Tool {
             name: "ripgrep",
@@ -112,6 +125,7 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
             binary_name: "rg",
             path_in_archive: None,
             needs_source_share: false,
+            version_arg: None,
         },
         Tool {
             name: "helix",
@@ -119,6 +133,7 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
             binary_name: "hx",
             path_in_archive: Some("hx"),
             needs_source_share: false,
+            version_arg: Some("--version"),
         },
     ];
 
