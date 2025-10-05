@@ -1,5 +1,5 @@
 use crate::error::AppResult;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use console::style;
 use indicatif::ProgressBar;
 use std::fs;

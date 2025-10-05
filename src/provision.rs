@@ -1,5 +1,5 @@
 use crate::error::AppResult;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use console::style;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
@@ -16,7 +16,7 @@ use xz2::read::XzDecoder;
 use zip::ZipArchive;
 
 #[cfg(unix)]
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{PermissionsExt, symlink};
 #[cfg(windows)]
 use std::os::windows::fs::{symlink_dir, symlink_file};
 
@@ -79,7 +79,6 @@ pub async fn provision_tool(
             tracing::debug!("Tool not found on system, proceeding with download.");
         }
     }
-
 
     let download_result = if tool.path_in_archive.is_some() {
         download_and_install_archive(env_dir, tool, pb, spinner_style).await
@@ -146,10 +145,7 @@ async fn download_and_install_binary(
     let temp_file = download_to_temp_file(&download_url, &asset_name, pb).await?;
 
     pb.set_style(spinner_style.clone());
-    pb.set_message(format!(
-        "Extracting {}...",
-        style(tool.binary_name).bold()
-    ));
+    pb.set_message(format!("Extracting {}...", style(tool.binary_name).bold()));
 
     let bin_dir = env_dir.join("bin");
     let tool_path = bin_dir.join(tool.binary_name);
@@ -195,7 +191,10 @@ async fn download_and_install_archive(
     let file = temp_file.reopen()?;
 
     pb.set_style(spinner_style.clone());
-    pb.set_message(format!("Extracting archive for {}...", style(tool.name).bold()));
+    pb.set_message(format!(
+        "Extracting archive for {}...",
+        style(tool.name).bold()
+    ));
 
     let tool_dir = if tool.name == "fish" {
         env_dir.join("fish_runtime")
@@ -259,10 +258,17 @@ async fn find_github_release_asset_url(
     tracing::debug!(asset_count = assets.len(), "Found release assets");
 
     let os_targets: Vec<&str> = match os {
-        "linux" | "android" => match tool.name {
-            "fish" | "helix" => vec!["linux"],
-            _ => vec!["unknown-linux-gnu", "unknown-linux-musl"],
-        },
+        "linux" | "android" => {
+            let default_targets = if os == "android" {
+                vec!["unknown-linux-musl", "unknown-linux-gnu"]
+            } else {
+                vec!["unknown-linux-gnu", "unknown-linux-musl"]
+            };
+            match tool.name {
+                "fish" | "helix" => vec!["linux"],
+                _ => default_targets,
+            }
+        }
         "macos" => vec!["apple-darwin"],
         "windows" => vec!["pc-windows-msvc"],
         _ => return Err(anyhow!("Unsupported OS: {}", os)),
@@ -390,11 +396,7 @@ fn extract_zip_archive<R: io::Read + io::Seek>(
 }
 
 #[tracing::instrument(skip(reader))]
-fn extract_zip<R: Read + Seek>(
-    reader: R,
-    target_dir: &Path,
-    binary_name: &str,
-) -> AppResult<()> {
+fn extract_zip<R: Read + Seek>(reader: R, target_dir: &Path, binary_name: &str) -> AppResult<()> {
     let mut archive = ZipArchive::new(reader)?;
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
@@ -518,18 +520,20 @@ mod tests {
             .and(wiremock::matchers::path(
                 "/repos/BurntSushi/ripgrep/releases/latest",
             ))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "assets": [
-                    {
-                        "name": "decoy-asset-14.1.0-x86_64-unknown-linux-musl.tar.gz",
-                        "browser_download_url": "https://example.com/decoy.tar.gz"
-                    },
-                    {
-                        "name": "ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz",
-                        "browser_download_url": "https://example.com/ripgrep.tar.gz"
-                    }
-                ]
-            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "assets": [
+                        {
+                            "name": "decoy-asset-14.1.0-x86_64-unknown-linux-musl.tar.gz",
+                            "browser_download_url": "https://example.com/decoy.tar.gz"
+                        },
+                        {
+                            "name": "ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz",
+                            "browser_download_url": "https://example.com/ripgrep.tar.gz"
+                        }
+                    ]
+                })),
+            )
             .mount(&mock_server)
             .await;
 

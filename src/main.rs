@@ -5,7 +5,7 @@ mod provision;
 
 use crate::cli::Cli;
 use crate::error::AppResult;
-use crate::provision::{provision_tool, Tool};
+use crate::provision::{Tool, provision_tool};
 use anyhow::Context;
 use clap::Parser;
 use console::style;
@@ -60,8 +60,8 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
 
     // --- UI Setup ---
     let mp = MultiProgress::new();
-    let spinner_style = ProgressStyle::with_template("{spinner:.green} {msg}")?
-        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏-");
+    let spinner_style =
+        ProgressStyle::with_template("{spinner:.green} {msg}")?.tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏-");
 
     mp.println(format!(
         "{} Setting up environment in {}",
@@ -116,7 +116,10 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
             style("Fatal:").red().bold(),
             style(&e).red().bold()
         );
-        eprintln!("{}", style("Cleaning up partially created environment...").yellow());
+        eprintln!(
+            "{}",
+            style("Cleaning up partially created environment...").yellow()
+        );
         fs::remove_dir_all(&env_dir)
             .context("Failed to clean up environment directory during error recovery")?;
         eprintln!("{}", style("Cleanup complete.").green());
@@ -137,7 +140,6 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
 
     Ok(())
 }
-
 
 /// Encapsulates the entire environment setup process. If any step fails,
 /// it returns an error, allowing the caller to perform a cleanup.
@@ -160,7 +162,6 @@ async fn setup_environment(
     let data_dir = env_dir.join("data");
     fs::create_dir_all(&data_dir)?;
     tracing::trace!(path = %data_dir.display(), "Created data directory");
-
 
     // --- Provisioning Loop ---
     for tool in tools {
