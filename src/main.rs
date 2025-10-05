@@ -5,14 +5,16 @@ mod provision;
 
 use crate::cli::Cli;
 use crate::error::AppResult;
-use crate::provision::{Tool, provision_tool};
+use crate::provision::Tool;
 use anyhow::Context;
 use clap::Parser;
 use console::style;
+use futures::future::try_join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokio::task::JoinHandle;
 
 #[tokio::main]
 async fn main() {
@@ -150,7 +152,7 @@ async fn setup_environment(
     mp: &MultiProgress,
     spinner_style: &ProgressStyle,
 ) -> AppResult<()> {
-    // Create environment directories.
+    // --- Create environment directories ---
     let bin_dir = env_dir.join("bin");
     fs::create_dir_all(&bin_dir)?;
     tracing::trace!(path = %bin_dir.display(), "Created bin directory");
@@ -163,17 +165,43 @@ async fn setup_environment(
     fs::create_dir_all(&data_dir)?;
     tracing::trace!(path = %data_dir.display(), "Created data directory");
 
-    // --- Provisioning Loop ---
-    for tool in tools {
-        let pb = mp.add(ProgressBar::new_spinner());
-        pb.enable_steady_tick(Duration::from_millis(120));
-        pb.set_style(spinner_style.clone());
-        provision_tool(env_dir, tool, &pb, spinner_style)
-            .await
-            .with_context(|| format!("Failed to provision tool: '{}'", tool.name))?;
+    // --- Step 1: Create all UI spinners upfront ---
+    let progress_bars: Vec<_> = tools
+        .iter()
+        .map(|tool| {
+            let pb = mp.add(ProgressBar::new_spinner());
+            pb.enable_steady_tick(Duration::from_millis(120));
+            pb.set_style(spinner_style.clone());
+            pb.set_message(format!("Queued {}...", style(tool.name).bold()));
+            pb
+        })
+        .collect();
+
+    // --- Step 2: Spawn all provisioning tasks ---
+    let mut tasks: Vec<JoinHandle<AppResult<()>>> = Vec::new();
+    for (tool, pb) in tools.iter().cloned().zip(progress_bars.into_iter()) {
+        let env_dir = env_dir.to_path_buf();
+        let spinner_style = spinner_style.clone();
+
+        let task = tokio::spawn(async move {
+            provision::provision_tool(&env_dir, &tool, &pb, &spinner_style)
+                .await
+                .with_context(|| format!("Failed to provision tool: '{}'", tool.name))
+        });
+        tasks.push(task);
     }
 
-    // --- Configuration Step ---
+    // --- Step 3: Await tasks concurrently. Abort all on first error. ---
+    let results = try_join_all(tasks)
+        .await
+        .context("A provisioning task panicked or was cancelled")?;
+
+    // Check for any application-level errors from the completed tasks
+    for result in results {
+        result.context("A provisioning task returned an error")?;
+    }
+
+    // --- Configuration Step (same as before) ---
     let pb_config = mp.add(ProgressBar::new_spinner());
     pb_config.enable_steady_tick(Duration::from_millis(120));
     pb_config.set_style(spinner_style.clone());

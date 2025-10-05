@@ -1,9 +1,11 @@
 use crate::error::AppResult;
-use anyhow::{Context, anyhow};
+use anyhow::{anyhow, Context};
 use console::style;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
+use tokio_retry::strategy::{jitter, ExponentialBackoff};
+use tokio_retry::Retry;
 use pathdiff;
 use regex::Regex;
 use serde_json::Value;
@@ -72,7 +74,7 @@ fn get_glibc_version() -> Option<(u32, u32)> {
 }
 
 /// Represents a tool to be provisioned.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Tool {
     pub name: &'static str,
     pub repo: &'static str,
@@ -155,28 +157,45 @@ async fn download_to_temp_file(
     asset_name: &str,
     pb: &ProgressBar,
 ) -> AppResult<NamedTempFile> {
-    let response = reqwest::get(url).await?.error_for_status()?;
-    let total_size = response.content_length().unwrap_or(0);
+    let retry_strategy = ExponentialBackoff::from_millis(500).map(jitter).take(3);
 
-    let download_style = ProgressStyle::with_template(
-        "{spinner:.green} {msg}\n{wide_bar:.cyan/blue} {bytes}/{total_bytes} ({eta})",
-    )?
-    .progress_chars("#>-");
+    let result = Retry::spawn(retry_strategy, || async {
+        // Reset progress bar on each attempt
+        pb.set_position(0);
 
-    pb.set_style(download_style);
-    pb.set_length(total_size);
-    pb.set_message(format!("Downloading {}", style(asset_name).cyan()));
+        let response = reqwest::get(url)
+            .await
+            .map_err(|e| e.to_string())?
+            .error_for_status()
+            .map_err(|e| e.to_string())?;
+        let total_size = response.content_length().unwrap_or(0);
 
-    let mut temp_file = NamedTempFile::new()?;
-    let mut stream = response.bytes_stream();
+        let download_style = ProgressStyle::with_template(
+            "{spinner:.green} {msg}\n{wide_bar:.cyan/blue} {bytes}/{total_bytes} ({eta})",
+        )
+        .map_err(|e| e.to_string())?
+        .progress_chars("#>-");
 
-    while let Some(item) = stream.next().await {
-        let chunk = item.context("Failed to read download chunk")?;
-        temp_file.write_all(&chunk)?;
-        pb.inc(chunk.len() as u64);
-    }
+        pb.set_style(download_style);
+        pb.set_length(total_size);
+        pb.set_message(format!("Downloading {}", style(asset_name).cyan()));
 
-    Ok(temp_file)
+        let mut temp_file = NamedTempFile::new().map_err(|e| e.to_string())?;
+        let mut stream = response.bytes_stream();
+
+        while let Some(item) = stream.next().await {
+            let chunk = item.map_err(|e| format!("Failed to read download chunk: {}", e))?;
+            temp_file
+                .write_all(&chunk)
+                .map_err(|e| e.to_string())?;
+            pb.inc(chunk.len() as u64);
+        }
+
+        Ok(temp_file)
+    })
+    .await;
+
+    result.map_err(|e: String| anyhow!(e))
 }
 
 #[tracing::instrument(skip(env_dir, tool, pb, spinner_style))]
@@ -289,110 +308,120 @@ async fn find_github_release_asset_url(
     os: &str,
     arch: &str,
 ) -> AppResult<(String, String)> {
-    let repo_url = format!("{}/repos/{}/releases/latest", base_url, tool.repo);
-    tracing::debug!(url = %repo_url, "Fetching latest release from GitHub API");
-    let client = reqwest::Client::builder().user_agent("isoterm").build()?;
+    let retry_strategy = ExponentialBackoff::from_millis(500).map(jitter).take(3);
 
-    let response: Value = client
-        .get(&repo_url)
-        .send()
-        .await
-        .context("Failed to query GitHub API")?
-        .json()
-        .await
-        .context("Failed to parse JSON response from GitHub API")?;
+    let result = Retry::spawn(retry_strategy, || async {
+        let repo_url = format!("{}/repos/{}/releases/latest", base_url, tool.repo);
+        tracing::debug!(url = %repo_url, "Fetching latest release from GitHub API");
+        let client = reqwest::Client::builder()
+            .user_agent("isoterm")
+            .build()
+            .map_err(|e| e.to_string())?;
 
-    let assets = response["assets"]
-        .as_array()
-        .ok_or_else(|| anyhow!("No assets found in release for {}", tool.repo))?;
+        let response: Value = client
+            .get(&repo_url)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to query GitHub API: {}", e))?
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse JSON response from GitHub API: {}", e))?;
 
-    tracing::debug!(asset_count = assets.len(), "Found release assets");
+        let assets = response["assets"].as_array().ok_or_else(|| {
+            format!(
+                "No assets found in release for {}. The release might be empty or the API response changed.",
+                tool.repo
+            )
+        })?;
 
-    let os_targets: Vec<&str> = match os {
-        "linux" => {
-            let mut gnu_preferred = true;
+        tracing::debug!(asset_count = assets.len(), "Found release assets");
 
-            #[cfg(target_os = "linux")]
-            {
-                // Atuin's GNU binary is built against glibc 2.35.
-                // If the system's glibc is older, we prefer musl.
-                const MIN_GLIBC_VERSION: (u32, u32) = (2, 35);
+        let os_targets: Vec<&str> = match os {
+            "linux" => {
+                let mut gnu_preferred = true;
 
-                if let Some((major, minor)) = get_glibc_version() {
-                    if (major, minor) < MIN_GLIBC_VERSION {
-                        tracing::info!(
-                            "System glibc version {}.{} is older than required {}.{}. Prioritizing musl build.",
-                            major, minor, MIN_GLIBC_VERSION.0, MIN_GLIBC_VERSION.1
-                        );
-                        gnu_preferred = false;
+                #[cfg(target_os = "linux")]
+                {
+                    // Atuin's GNU binary is built against glibc 2.35.
+                    // If the system's glibc is older, we prefer musl.
+                    const MIN_GLIBC_VERSION: (u32, u32) = (2, 35);
+
+                    if let Some((major, minor)) = get_glibc_version() {
+                        if (major, minor) < MIN_GLIBC_VERSION {
+                            tracing::info!(
+                                "System glibc version {}.{} is older than required {}.{}. Prioritizing musl build.",
+                                major, minor, MIN_GLIBC_VERSION.0, MIN_GLIBC_VERSION.1
+                            );
+                            gnu_preferred = false;
+                        }
+                    } else {
+                        tracing::warn!("Could not determine glibc version. Defaulting to musl for safety.");
+                        gnu_preferred = false; // Default to safer musl if check fails
                     }
+                }
+
+                let default_targets = if gnu_preferred {
+                    vec!["unknown-linux-gnu", "unknown-linux-musl"]
                 } else {
-                    tracing::warn!("Could not determine glibc version. Defaulting to musl for safety.");
-                    gnu_preferred = false; // Default to safer musl if check fails
+                    vec!["unknown-linux-musl", "unknown-linux-gnu"]
+                };
+
+                match tool.name {
+                    "fish" | "helix" => vec!["linux"],
+                    _ => default_targets,
                 }
             }
+            "android" => {
+                // Android does not use glibc, so musl is generally the better choice if available.
+                 match tool.name {
+                    "fish" | "helix" => vec!["linux"],
+                    _ => vec!["unknown-linux-musl", "unknown-linux-gnu"],
+                }
+            }
+            "macos" => vec!["apple-darwin"],
+            "windows" => vec!["pc-windows-msvc"],
+            _ => return Err(format!("Unsupported OS: {}", os)),
+        };
 
-            let default_targets = if gnu_preferred {
-                vec!["unknown-linux-gnu", "unknown-linux-musl"]
-            } else {
-                vec!["unknown-linux-musl", "unknown-linux-gnu"]
-            };
-
+        let ext = if os == "windows" {
+            "zip"
+        } else {
             match tool.name {
-                "fish" | "helix" => vec!["linux"],
-                _ => default_targets,
+                "helix" if os == "linux" => "tar.xz",
+                "helix" if os == "macos" => "zip",
+                "fish" => "tar.xz",
+                _ => "tar.gz",
             }
-        }
-        "android" => {
-            // Android does not use glibc, so musl is generally the better choice if available.
-             match tool.name {
-                "fish" | "helix" => vec!["linux"],
-                _ => vec!["unknown-linux-musl", "unknown-linux-gnu"],
-            }
-        }
-        "macos" => vec!["apple-darwin"],
-        "windows" => vec!["pc-windows-msvc"],
-        _ => return Err(anyhow!("Unsupported OS: {}", os)),
-    };
+        };
 
-    let ext = if os == "windows" {
-        "zip"
-    } else {
-        match tool.name {
-            "helix" if os == "linux" => "tar.xz",
-            "helix" if os == "macos" => "zip",
-            "fish" => "tar.xz",
-            _ => "tar.gz",
-        }
-    };
+        for os_target in &os_targets {
+            let fragments_to_use = vec![tool.name, arch, *os_target, ext];
+            tracing::debug!(fragments = ?fragments_to_use, "Searching for asset");
 
-    for os_target in &os_targets {
-        let fragments_to_use = vec![tool.name, arch, *os_target, ext];
+            for asset in assets {
+                let name = asset["name"].as_str().unwrap_or("");
+                let lower_name = name.to_lowercase();
 
-        tracing::debug!(fragments = ?fragments_to_use, "Searching for asset");
-
-        for asset in assets {
-            let name = asset["name"].as_str().unwrap_or("");
-            let lower_name = name.to_lowercase();
-
-            if fragments_to_use
-                .iter()
-                .all(|frag| lower_name.contains(&frag.to_lowercase()))
-            {
-                if let Some(url) = asset["browser_download_url"].as_str() {
-                    tracing::info!(asset = name, "Found matching release asset");
-                    return Ok((url.to_string(), name.to_string()));
+                if fragments_to_use
+                    .iter()
+                    .all(|frag| lower_name.contains(&frag.to_lowercase()))
+                {
+                    if let Some(url) = asset["browser_download_url"].as_str() {
+                        tracing::info!(asset = name, "Found matching release asset");
+                        return Ok((url.to_string(), name.to_string()));
+                    }
                 }
             }
         }
-    }
 
-    Err(anyhow!(
-        "Could not find a matching release asset for {} on {} {}",
-        tool.name,
-        env::consts::OS,
-        arch
-    ))
+        Err(format!(
+            "Could not find a matching release asset for {} on {} {}",
+            tool.name, os, arch
+        ))
+    })
+    .await;
+
+    result.map_err(|e: String| anyhow!(e))
 }
 
 #[tracing::instrument(skip(reader))]
