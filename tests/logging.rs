@@ -25,6 +25,11 @@ fn run_isoterm_with_args(args: &[&str]) -> (String, String) {
         }
     }
 
+    // Special setup for fish: create a dummy `share` directory to prevent
+    // the `provision_source_share` function from triggering a real download.
+    let fish_runtime_dir = dest_dir.join("fish_runtime").join("share");
+    fs::create_dir_all(&fish_runtime_dir).expect("Failed to create dummy fish share dir");
+
     let mut child = Command::new(bin_path)
         .args(args)
         .arg("--dest-dir")

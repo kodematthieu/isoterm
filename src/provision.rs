@@ -80,6 +80,7 @@ pub struct Tool {
     pub repo: &'static str,
     pub binary_name: &'static str,
     pub path_in_archive: Option<&'static str>,
+    pub needs_source_share: bool,
 }
 
 /// Main provisioning function for a single tool.
@@ -96,12 +97,22 @@ pub async fn provision_tool(
     let tool_path_in_env = bin_dir.join(tool.binary_name);
 
     if tool_path_in_env.exists() {
-        tracing::debug!(path = %tool_path_in_env.display(), "Tool already exists, skipping.");
+        tracing::debug!(path = %tool_path_in_env.display(), "Tool already exists, skipping binary provisioning.");
         pb.finish_with_message(format!(
             "{} {} is already provisioned",
             style("✓").green(),
             style(tool.name).bold()
         ));
+
+        // Even if the binary exists, we might still need to provision the 'share' directory.
+        if tool.needs_source_share {
+            let fish_runtime_dir = env_dir.join("fish_runtime");
+            if !fish_runtime_dir.join("share").exists() {
+                provision_source_share(&fish_runtime_dir, tool, pb).await?;
+            } else {
+                tracing::debug!("'share' directory already exists, skipping download.");
+            }
+        }
         return Ok(());
     }
 
@@ -148,6 +159,16 @@ pub async fn provision_tool(
         ));
         return Err(e);
     }
+
+    if tool.needs_source_share {
+        let fish_runtime_dir = env_dir.join("fish_runtime");
+        if !fish_runtime_dir.join("share").exists() {
+            provision_source_share(&fish_runtime_dir, tool, pb).await?;
+        } else {
+            tracing::debug!("'share' directory already exists, skipping download.");
+        }
+    }
+
     Ok(())
 }
 
@@ -299,6 +320,76 @@ async fn download_and_install_archive(
         style(tool.name).bold()
     ));
     Ok(())
+}
+
+#[tracing::instrument(skip(pb), fields(tool = tool.name, dest_dir = %dest_dir.display()))]
+async fn provision_source_share(
+    dest_dir: &Path,
+    tool: &Tool,
+    pb: &ProgressBar,
+) -> AppResult<()> {
+    pb.set_message(format!(
+        "Downloading {} source for 'share' dir...",
+        style(tool.name).bold()
+    ));
+
+    // 1. Get the source tarball URL
+    let (source_url, asset_name) =
+        find_github_source_tarball_url(tool, "https://api.github.com").await?;
+
+    // 2. Download to a temp file
+    let temp_file = download_to_temp_file(&source_url, &asset_name, pb).await?;
+    let mut file = temp_file.reopen()?;
+
+    // 3. Selectively extract the 'share' directory
+    pb.set_message(format!("Extracting 'share' for {}...", style(tool.name).bold()));
+    extract_share_from_tar_gz(&mut file, dest_dir)?;
+
+    Ok(())
+}
+
+#[tracing::instrument(fields(repo = tool.repo))]
+async fn find_github_source_tarball_url(
+    tool: &Tool,
+    base_url: &str,
+) -> AppResult<(String, String)> {
+    let retry_strategy = ExponentialBackoff::from_millis(500).map(jitter).take(3);
+
+    let result = Retry::spawn(retry_strategy, || async {
+        let repo_url = format!("{}/repos/{}/releases/latest", base_url, tool.repo);
+        tracing::debug!(url = %repo_url, "Fetching latest release from GitHub API");
+        let client = reqwest::Client::builder()
+            .user_agent("isoterm")
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        let response: Value = client
+            .get(&repo_url)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to query GitHub API: {}", e))?
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse JSON response from GitHub API: {}", e))?;
+
+        let tarball_url = response["tarball_url"].as_str().ok_or_else(|| {
+            format!(
+                "No 'tarball_url' found in release for {}. The API response may have changed.",
+                tool.repo
+            )
+        })?;
+
+        let tag_name = response["tag_name"]
+            .as_str()
+            .unwrap_or("source")
+            .to_string();
+
+        tracing::info!(url = tarball_url, "Found source tarball URL");
+        Ok((tarball_url.to_string(), tag_name))
+    })
+    .await;
+
+    result.map_err(|e: String| anyhow!(e))
 }
 
 #[tracing::instrument(fields(repo = tool.repo, os = os, arch = arch))]
@@ -554,6 +645,44 @@ fn create_symlink(original: &Path, link: &Path) -> AppResult<()> {
         symlink_file(relative_path, link).context("Failed to create file symlink")
     }
 }
+
+/// Extracts only the 'share' directory from a gzipped tarball into a target directory.
+/// It strips the top-level directory from the archive, so the contents of 'share'
+/// are placed directly in the target directory.
+#[tracing::instrument(skip(reader))]
+fn extract_share_from_tar_gz<R: Read>(reader: R, target_dir: &Path) -> AppResult<()> {
+    let tar = GzDecoder::new(reader);
+    let mut archive = Archive::new(tar);
+    fs::create_dir_all(target_dir)?;
+
+    for entry_result in archive.entries()? {
+        let mut entry = entry_result?;
+        let path = entry.path()?;
+
+        // Find paths that are inside a 'share' directory.
+        // e.g., "fish-shell-3.7.1/share/completions/git.fish"
+        if let Some(share_index) = path.to_str().and_then(|s| s.find("/share/")) {
+            // Get the path relative to the inside of the 'share' dir.
+            // For the example above, this becomes "completions/git.fish".
+            // We add 1 to the index to skip the leading slash.
+            let relative_path_str = &path.to_str().unwrap()[share_index + 1..];
+            let relative_path = Path::new(relative_path_str);
+
+            // Prepend the target directory to get the final output path.
+            let outpath = target_dir.join(relative_path);
+
+            if let Some(p) = outpath.parent() {
+                if !p.exists() {
+                    fs::create_dir_all(p)?;
+                }
+            }
+            entry.unpack(&outpath)?;
+        }
+    }
+
+    Ok(())
+}
+
 
 #[cfg(test)]
 mod tests {
