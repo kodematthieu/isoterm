@@ -259,7 +259,7 @@ async fn find_github_release_asset_url(
     tracing::debug!(asset_count = assets.len(), "Found release assets");
 
     let os_targets: Vec<&str> = match os {
-        "linux" => match tool.name {
+        "linux" | "android" => match tool.name {
             "fish" | "helix" => vec!["linux"],
             _ => vec!["unknown-linux-gnu", "unknown-linux-musl"],
         },
