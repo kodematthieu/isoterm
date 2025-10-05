@@ -11,11 +11,11 @@ use shellexpand;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 use tar::Archive;
-use tempfile::{NamedTempFile, TempPath};
+use tempfile::NamedTempFile;
 use tokio_retry::Retry;
 use tokio_retry::strategy::{ExponentialBackoff, jitter};
 use xz2::read::XzDecoder;
@@ -82,7 +82,6 @@ pub struct Tool {
     pub binary_name: &'static str,
     pub path_in_archive: Option<&'static str>,
     pub needs_source_share: bool,
-    pub version_arg: Option<&'static str>,
 }
 
 /// Main provisioning function for a single tool.
@@ -129,12 +128,7 @@ pub async fn provision_tool(
             match create_symlink(&system_path, &tool_path_in_env) {
                 Ok(_) => {
                     tracing::debug!("Successfully created symlink");
-                    pb.finish_with_message(format!(
-                        "{} Symlinked {} from {}",
-                        style("✓").green(),
-                        style(tool.name).bold(),
-                        style(system_path.display()).cyan()
-                    ));
+                    let mut needs_further_action = false;
 
                     // Post-symlink logic for specific tools like Helix
                     if tool.name == "helix" {
@@ -149,17 +143,17 @@ pub async fn provision_tool(
                             pb.set_message(
                                 "Detected Helix symlink, provisioning matching runtime...",
                             );
+                            needs_further_action = true; // Mark that we need to download
 
                             // This is a blocking operation (network + file IO), so we
                             // spawn it on a blocking thread to avoid starving the async runtime.
+                            let system_path_clone = system_path.clone();
                             let env_dir_clone = env_dir.to_path_buf();
-                            let client_clone = client.clone();
                             let pb_clone = pb.clone();
                             tokio::task::spawn_blocking(move || {
                                 provision_helix_runtime_for_symlink(
-                                    &system_path,
+                                    &system_path_clone,
                                     &env_dir_clone,
-                                    &client_clone,
                                     &pb_clone,
                                 )
                             })
@@ -168,7 +162,19 @@ pub async fn provision_tool(
                         }
                     }
 
-                    return Ok(());
+                    // If no further action was taken (like downloading a runtime), we can
+                    // finish the progress bar now and return. Otherwise, we let the
+                    // function continue so the final success message is shown after all
+                    // steps are complete.
+                    if !needs_further_action {
+                        pb.finish_with_message(format!(
+                            "{} Symlinked {} from {}",
+                            style("✓").green(),
+                            style(tool.name).bold(),
+                            style(system_path.display()).cyan()
+                        ));
+                        return Ok(());
+                    }
                 }
                 Err(e) => {
                     tracing::debug!(error = %e, "Failed to create symlink, proceeding with download.");
@@ -744,11 +750,10 @@ fn extract_share_from_tar_gz<R: Read>(reader: R, target_dir: &Path) -> AppResult
 }
 
 /// For a symlinked Helix, provisions a local runtime if the user-wide one is missing.
-#[tracing::instrument(skip(system_hx_path, env_dir, client, pb))]
+#[tracing::instrument(skip(system_hx_path, env_dir, pb))]
 fn provision_helix_runtime_for_symlink(
     system_hx_path: &Path,
     env_dir: &Path,
-    client: &reqwest::Client,
     pb: &ProgressBar,
 ) -> AppResult<()> {
     // 1. Get Helix version from the system binary.
@@ -763,11 +768,10 @@ fn provision_helix_runtime_for_symlink(
         env::consts::OS,
         env::consts::ARCH,
         "https://api.github.com",
-        client,
     )?;
 
     // 3. Download the archive to a temp file.
-    let temp_file = download_to_temp_file_blocking(&download_url, &asset_name, pb, client)?;
+    let temp_file = download_to_temp_file_blocking(&download_url, &asset_name, pb)?;
 
     // 4. Selectively extract ONLY the `runtime` directory.
     let helix_dir = env_dir.join("helix");
@@ -828,7 +832,6 @@ fn download_to_temp_file_blocking(
     url: &str,
     asset_name: &str,
     pb: &ProgressBar,
-    client: &reqwest::Client,
 ) -> AppResult<NamedTempFile> {
     pb.set_position(0);
 
@@ -866,14 +869,13 @@ fn download_to_temp_file_blocking(
 }
 
 /// Finds a GitHub release asset URL for a specific version tag.
-#[tracing::instrument(skip(client), fields(repo = repo, tag = tag, os = os, arch = arch))]
+#[tracing::instrument(fields(repo = repo, tag = tag, os = os, arch = arch))]
 fn find_github_release_asset_url_by_tag(
     repo: &str,
     tag: &str,
     os: &str,
     arch: &str,
     base_url: &str,
-    client: &reqwest::Client,
 ) -> AppResult<(String, String)> {
     let repo_url = format!("{}/repos/{}/releases/tags/{}", base_url, repo, tag);
     tracing::debug!(url = %repo_url, "Fetching release by tag from GitHub API");

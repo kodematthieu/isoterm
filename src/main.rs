@@ -93,7 +93,6 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
             binary_name: "fish",
             path_in_archive: None,
             needs_source_share: true,
-            version_arg: None,
         },
         Tool {
             name: "starship",
@@ -101,7 +100,6 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
             binary_name: "starship",
             path_in_archive: None,
             needs_source_share: false,
-            version_arg: None,
         },
         Tool {
             name: "zoxide",
@@ -109,7 +107,6 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
             binary_name: "zoxide",
             path_in_archive: None,
             needs_source_share: false,
-            version_arg: None,
         },
         Tool {
             name: "atuin",
@@ -117,7 +114,6 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
             binary_name: "atuin",
             path_in_archive: None,
             needs_source_share: false,
-            version_arg: None,
         },
         Tool {
             name: "ripgrep",
@@ -125,7 +121,6 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
             binary_name: "rg",
             path_in_archive: None,
             needs_source_share: false,
-            version_arg: None,
         },
         Tool {
             name: "helix",
@@ -133,7 +128,6 @@ async fn run_inner(cli: Cli) -> AppResult<()> {
             binary_name: "hx",
             path_in_archive: Some("hx"),
             needs_source_share: false,
-            version_arg: Some("--version"),
         },
     ];
 
