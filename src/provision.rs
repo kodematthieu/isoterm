@@ -1,11 +1,9 @@
 use crate::error::AppResult;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use console::style;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
-use tokio_retry::strategy::{jitter, ExponentialBackoff};
-use tokio_retry::Retry;
 use pathdiff;
 use regex::Regex;
 use serde_json::Value;
@@ -17,6 +15,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use tar::Archive;
 use tempfile::NamedTempFile;
+use tokio_retry::Retry;
+use tokio_retry::strategy::{ExponentialBackoff, jitter};
 use xz2::read::XzDecoder;
 use zip::ZipArchive;
 
@@ -206,9 +206,7 @@ async fn download_to_temp_file(
 
         while let Some(item) = stream.next().await {
             let chunk = item.map_err(|e| format!("Failed to read download chunk: {}", e))?;
-            temp_file
-                .write_all(&chunk)
-                .map_err(|e| e.to_string())?;
+            temp_file.write_all(&chunk).map_err(|e| e.to_string())?;
             pb.inc(chunk.len() as u64);
         }
 
@@ -246,6 +244,8 @@ async fn download_and_install_binary(
         extract_zip(&mut file, &bin_dir, tool.binary_name)?;
     } else if asset_name.ends_with(".tar.gz") {
         extract_tar_gz(&mut file, &bin_dir, tool.binary_name)?;
+    } else if asset_name.ends_with(".tar.xz") {
+        extract_tar_xz(&mut file, &bin_dir, tool.binary_name)?;
     } else {
         return Err(anyhow!("Unsupported archive format for {}", asset_name));
     }
@@ -323,11 +323,7 @@ async fn download_and_install_archive(
 }
 
 #[tracing::instrument(skip(pb), fields(tool = tool.name, dest_dir = %dest_dir.display()))]
-async fn provision_source_share(
-    dest_dir: &Path,
-    tool: &Tool,
-    pb: &ProgressBar,
-) -> AppResult<()> {
+async fn provision_source_share(dest_dir: &Path, tool: &Tool, pb: &ProgressBar) -> AppResult<()> {
     pb.set_message(format!(
         "Downloading {} source for 'share' dir...",
         style(tool.name).bold()
@@ -342,7 +338,10 @@ async fn provision_source_share(
     let mut file = temp_file.reopen()?;
 
     // 3. Selectively extract the 'share' directory
-    pb.set_message(format!("Extracting 'share' for {}...", style(tool.name).bold()));
+    pb.set_message(format!(
+        "Extracting 'share' for {}...",
+        style(tool.name).bold()
+    ));
     extract_share_from_tar_gz(&mut file, dest_dir)?;
 
     Ok(())
@@ -534,6 +533,25 @@ fn extract_tar_gz<R: Read>(reader: R, target_dir: &Path, binary_name: &str) -> A
     ))
 }
 
+#[tracing::instrument(skip(reader))]
+fn extract_tar_xz<R: Read>(reader: R, target_dir: &Path, binary_name: &str) -> AppResult<()> {
+    let tar = XzDecoder::new(reader);
+    let mut archive = Archive::new(tar);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+        tracing::trace!(entry_path = ?path, "Unpacking archive entry");
+        if path.file_name().map_or(false, |n| n == binary_name) {
+            entry.unpack(target_dir.join(binary_name))?;
+            return Ok(());
+        }
+    }
+    Err(anyhow!(
+        "Could not find '{}' in the downloaded .tar.xz archive.",
+        binary_name
+    ))
+}
+
 fn extract_archive<R: io::Read>(archive: &mut Archive<R>, target_dir: &Path) -> AppResult<()> {
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
@@ -683,7 +701,6 @@ fn extract_share_from_tar_gz<R: Read>(reader: R, target_dir: &Path) -> AppResult
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,6 +798,7 @@ mod tests {
             repo: "BurntSushi/ripgrep",
             binary_name: "rg",
             path_in_archive: None,
+            needs_source_share: false,
         };
 
         let (url, name) =
