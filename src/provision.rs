@@ -130,6 +130,14 @@ pub async fn provision_tool(
                     tracing::debug!("Successfully created symlink");
                     let mut needs_further_action = false;
 
+                    // Print a persistent message for the symlink creation.
+                    pb.println(format!(
+                        "{} Symlinked {} from {}",
+                        style("✓").green(),
+                        style(tool.name).bold(),
+                        style(system_path.display()).cyan()
+                    ));
+
                     // Post-symlink logic for specific tools like Helix
                     if tool.name == "helix" {
                         let user_helix_runtime_dir =
@@ -141,15 +149,16 @@ pub async fn provision_tool(
                                 "User-wide helix runtime not found. Provisioning a local one."
                             );
                             pb.set_message(
-                                "Detected Helix symlink, provisioning matching runtime...",
+                                "Provisioning matching runtime...",
                             );
-                            needs_further_action = true; // Mark that we need to download
+                            needs_further_action = true; // Mark that we need to download.
 
                             // This is a blocking operation (network + file IO), so we
                             // spawn it on a blocking thread to avoid starving the async runtime.
-                            let system_path_clone = system_path.clone();
                             let env_dir_clone = env_dir.to_path_buf();
                             let pb_clone = pb.clone();
+                            let system_path_clone = system_path.clone();
+
                             tokio::task::spawn_blocking(move || {
                                 provision_helix_runtime_for_symlink(
                                     &system_path_clone,
@@ -162,17 +171,11 @@ pub async fn provision_tool(
                         }
                     }
 
-                    // If no further action was taken (like downloading a runtime), we can
-                    // finish the progress bar now and return. Otherwise, we let the
-                    // function continue so the final success message is shown after all
-                    // steps are complete.
+                    // If no further action was taken, the spinner for this tool is now
+                    // redundant. We clear it and return. Otherwise, we let the function
+                    // continue so the spinner can show progress for the next step (e.g., download).
                     if !needs_further_action {
-                        pb.finish_with_message(format!(
-                            "{} Symlinked {} from {}",
-                            style("✓").green(),
-                            style(tool.name).bold(),
-                            style(system_path.display()).cyan()
-                        ));
+                        pb.finish_and_clear();
                         return Ok(());
                     }
                 }
