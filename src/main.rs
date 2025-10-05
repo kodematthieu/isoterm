@@ -23,23 +23,36 @@ async fn main() {
     }
 }
 
-#[tracing::instrument]
 async fn run() -> AppResult<()> {
     let cli = Cli::parse();
 
     // Conditionally initialize the tracing subscriber based on the verbose flag.
     if cli.verbose > 0 {
-        let level = match cli.verbose {
+        // This structure provides a default log level for all crates
+        // and adjusts the level for `isoterm` based on verbosity.
+        // -v: info
+        // -vv: info, with isoterm at debug
+        // -vvv: debug, with isoterm at trace
+        // -vvvv: trace for everything
+        let filter = match cli.verbose {
             1 => "info",
-            2 => "debug",
+            2 => "info,isoterm=debug",
+            3 => "debug,isoterm=trace",
             _ => "trace",
         };
-        let filter = format!("isoterm={}", level);
         tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
             .with_writer(std::io::stderr) // Write logs to stderr to not interfere with UI
             .init();
     }
+
+    run_inner(cli).await
+}
+
+async fn run_inner(cli: Cli) -> AppResult<()> {
+    tracing::trace!("trace log from run_inner");
+    tracing::debug!("debug log from run_inner");
+    tracing::info!("info log from run_inner");
 
     // Expand the user-provided path.
     let dest_dir_str = shellexpand::tilde(&cli.dest_dir).to_string();
@@ -124,6 +137,7 @@ async fn run() -> AppResult<()> {
 
     Ok(())
 }
+
 
 /// Encapsulates the entire environment setup process. If any step fails,
 /// it returns an error, allowing the caller to perform a cleanup.
