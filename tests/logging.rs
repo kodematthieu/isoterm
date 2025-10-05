@@ -27,7 +27,8 @@ fn run_isoterm_with_args(args: &[&str]) -> (String, String) {
 
     let mut child = Command::new(bin_path)
         .args(args)
-        .args(&[dest_dir.to_str().unwrap()])
+        .arg("--dest-dir")
+        .arg(dest_dir.to_str().unwrap())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -52,10 +53,14 @@ fn run_isoterm_with_args(args: &[&str]) -> (String, String) {
         String::from_utf8(buffer).expect("Failed to parse stderr")
     });
 
-    child.wait().expect("Child process failed to exit");
-
+    // Join the threads to get the output *before* waiting on the child process.
+    // This is crucial to prevent a deadlock where the child process fills its
+    // output buffer and waits for the parent to read it, while the parent is
+    // simultaneously waiting for the child to exit.
     let stdout_str = stdout_thread.join().unwrap();
     let stderr_str = stderr_thread.join().unwrap();
+
+    child.wait().expect("Child process failed to exit");
 
     (stdout_str, stderr_str)
 }

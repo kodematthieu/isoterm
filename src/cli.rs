@@ -5,7 +5,7 @@ use clap::Parser;
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
     /// The directory where the environment will be created.
-    #[arg(default_value = "~/.local_shell")]
+    #[arg(long, default_value = "~/.isoterm")]
     pub dest_dir: String,
 
     /// Enable verbose logging. Use -v for info, -vv for debug.

@@ -5,11 +5,14 @@ use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use pathdiff;
+use regex::Regex;
 use serde_json::Value;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::thread;
 use tar::Archive;
 use tempfile::NamedTempFile;
 use xz2::read::XzDecoder;
@@ -19,6 +22,54 @@ use zip::ZipArchive;
 use std::os::unix::fs::{PermissionsExt, symlink};
 #[cfg(windows)]
 use std::os::windows::fs::{symlink_dir, symlink_file};
+
+/// Attempts to get the system's glibc version.
+/// Returns a tuple of (major, minor) version numbers on success.
+#[cfg(target_os = "linux")]
+fn get_glibc_version() -> Option<(u32, u32)> {
+    let mut child = Command::new("ldd")
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null()) // Redirect stderr to prevent it from blocking
+        .spawn()
+        .ok()?;
+
+    // Take ownership of the stdout pipe.
+    let mut stdout_pipe = child.stdout.take()?;
+
+    // Spawn a thread to read stdout asynchronously. This prevents a deadlock
+    // if the child process generates a lot of output and fills the buffer.
+    let stdout_thread = thread::spawn(move || {
+        let mut stdout = String::new();
+        stdout_pipe.read_to_string(&mut stdout).ok()?;
+        Some(stdout)
+    });
+
+    // Retrieve the output from the reader thread *before* waiting on the child.
+    // This is crucial to prevent a deadlock where the child fills the stdout
+    // buffer and waits for the parent to read, while the parent is waiting for
+    // the child to exit.
+    let stdout = stdout_thread.join().ok()??;
+
+    // Now, wait for the process to complete.
+    let status = child.wait().ok()?;
+    if !status.success() {
+        return None;
+    }
+    let first_line = stdout.lines().next()?;
+
+    // Regex to find version numbers like "2.35"
+    let re = Regex::new(r"(\d+)\.(\d+)").ok()?;
+
+    // Find the last match on the first line, as that's typically the version number.
+    let caps = re.captures_iter(first_line).last()?;
+
+    let major = caps.get(1)?.as_str().parse().ok()?;
+    let minor = caps.get(2)?.as_str().parse().ok()?;
+
+    tracing::debug!("Detected glibc version {}.{}", major, minor);
+    Some((major, minor))
+}
 
 /// Represents a tool to be provisioned.
 #[derive(Debug)]
@@ -258,15 +309,45 @@ async fn find_github_release_asset_url(
     tracing::debug!(asset_count = assets.len(), "Found release assets");
 
     let os_targets: Vec<&str> = match os {
-        "linux" | "android" => {
-            let default_targets = if os == "android" {
-                vec!["unknown-linux-musl", "unknown-linux-gnu"]
-            } else {
+        "linux" => {
+            let mut gnu_preferred = true;
+
+            #[cfg(target_os = "linux")]
+            {
+                // Atuin's GNU binary is built against glibc 2.35.
+                // If the system's glibc is older, we prefer musl.
+                const MIN_GLIBC_VERSION: (u32, u32) = (2, 35);
+
+                if let Some((major, minor)) = get_glibc_version() {
+                    if (major, minor) < MIN_GLIBC_VERSION {
+                        tracing::info!(
+                            "System glibc version {}.{} is older than required {}.{}. Prioritizing musl build.",
+                            major, minor, MIN_GLIBC_VERSION.0, MIN_GLIBC_VERSION.1
+                        );
+                        gnu_preferred = false;
+                    }
+                } else {
+                    tracing::warn!("Could not determine glibc version. Defaulting to musl for safety.");
+                    gnu_preferred = false; // Default to safer musl if check fails
+                }
+            }
+
+            let default_targets = if gnu_preferred {
                 vec!["unknown-linux-gnu", "unknown-linux-musl"]
+            } else {
+                vec!["unknown-linux-musl", "unknown-linux-gnu"]
             };
+
             match tool.name {
                 "fish" | "helix" => vec!["linux"],
                 _ => default_targets,
+            }
+        }
+        "android" => {
+            // Android does not use glibc, so musl is generally the better choice if available.
+             match tool.name {
+                "fish" | "helix" => vec!["linux"],
+                _ => vec!["unknown-linux-musl", "unknown-linux-gnu"],
             }
         }
         "macos" => vec!["apple-darwin"],

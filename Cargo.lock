@@ -1013,6 +1013,7 @@ dependencies = [
  "futures-util",
  "indicatif",
  "pathdiff",
+ "regex",
  "reqwest",
  "serde_json",
  "shellexpand",

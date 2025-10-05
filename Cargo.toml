@@ -22,6 +22,7 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 which = "8.0.0"
 xz2 = "0.1.7"
 pathdiff = "0.2.3"
+regex = "1.10.5"
 zip = "5.1.1"
 
 [target.'aarch64-linux-android'.dependencies.reqwest]
