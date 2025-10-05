@@ -1,6 +1,6 @@
 [package]
 name = "isoterm"
-version = "0.1.0-dev.1"
+version = "0.1.0-dev.2"
 edition = "2024"
 
 [dependencies]
