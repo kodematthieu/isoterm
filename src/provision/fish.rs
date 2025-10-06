@@ -57,7 +57,7 @@ impl Tool for Fish {
         let archive_type = ArchiveType::from_asset_name(&asset_name)?;
         extract_full_archive(file, archive_type, &fish_runtime_dir)?;
 
-        let binary_path_in_archive = fish_runtime_dir.join("bin").join(self.binary_name());
+        let binary_path_in_archive = fish_runtime_dir.join(self.binary_name());
         let tool_path_in_env = context.env_dir.join("bin").join(self.binary_name());
         create_symlink(&binary_path_in_archive, &tool_path_in_env)?;
 
