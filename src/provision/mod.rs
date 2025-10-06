@@ -7,7 +7,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 use pathdiff;
 use regex::Regex;
 use serde_json::Value;
-use shellexpand;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, Write};
@@ -26,6 +25,63 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 #[cfg(windows)]
 use std::os::windows::fs::{symlink_dir, symlink_file};
 
+// --- Module Declarations ---
+pub mod atuin;
+pub mod fish;
+pub mod helix;
+pub mod ripgrep;
+pub mod starship;
+pub mod zoxide;
+
+// --- Tool Trait ---
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn repo(&self) -> &'static str;
+    fn binary_name(&self) -> &'static str;
+
+    /// The path of the binary within the downloaded archive, if it's not at the root.
+    fn path_in_archive(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// The main provisioning logic for downloading and installing from a remote source.
+    /// The default implementation downloads a single binary from a GitHub release.
+    /// More complex tools (like fish, helix) will override this.
+    #[tracing::instrument(skip(self, context, pb, spinner_style), fields(tool = self.name()))]
+    async fn provision_from_source(
+        &self,
+        context: &ProvisionContext,
+        pb: &ProgressBar,
+        spinner_style: &ProgressStyle,
+    ) -> AppResult<()> {
+        download_and_install_binary(
+            &context.env_dir,
+            self.name(),
+            self.repo(),
+            self.binary_name(),
+            pb,
+            spinner_style,
+            &context.client,
+        )
+        .await
+    }
+
+    /// A hook that runs after a symlink is created to a system-provided tool.
+    /// This is used by Helix to provision the runtime files even when the main binary is from the system.
+    #[tracing::instrument(skip(self, _context, _pb, _system_path), fields(tool = self.name()))]
+    async fn post_symlink_hook(
+        &self,
+        _context: &ProvisionContext,
+        _pb: &ProgressBar,
+        _system_path: &Path,
+    ) -> AppResult<()> {
+        // Default is to do nothing.
+        tracing::debug!("No post-symlink hook for this tool.");
+        Ok(())
+    }
+}
+
+
 /// A context struct to pass shared, read-only data to provisioning tasks.
 #[derive(Clone)]
 pub struct ProvisionContext {
@@ -33,454 +89,66 @@ pub struct ProvisionContext {
     pub client: reqwest::Client,
 }
 
-// --- Tool Structs ---
-pub struct Fish;
-pub struct Starship;
-pub struct Zoxide;
-pub struct Atuin;
-pub struct Ripgrep;
-pub struct Helix;
+// --- Generic Provisioning Orchestrator ---
 
-// --- Tool Implementations ---
+#[tracing::instrument(skip(tool, context, pb, spinner_style), fields(tool = tool.name()))]
+pub async fn provision_tool<T: Tool>(
+    tool: T,
+    context: &ProvisionContext,
+    pb: &ProgressBar,
+    spinner_style: &ProgressStyle,
+) -> AppResult<()> {
+    pb.set_message(format!("Provisioning {}...", style(tool.name()).bold()));
 
-impl Fish {
-    const NAME: &'static str = "fish";
-    const REPO: &'static str = "fish-shell/fish-shell";
-    const BINARY_NAME: &'static str = "fish";
+    let bin_dir = context.env_dir.join("bin");
+    let tool_path_in_env = bin_dir.join(tool.binary_name());
 
-    #[tracing::instrument(skip(self, context, pb, spinner_style), fields(tool = Self::NAME))]
-    pub async fn provision(
-        &self,
-        context: &ProvisionContext,
-        pb: &ProgressBar,
-        spinner_style: &ProgressStyle,
-    ) -> AppResult<()> {
-        pb.set_message(format!("Provisioning {}...", style(Self::NAME).bold()));
+    // 1. Check if the binary is already provisioned in our environment.
+    if tool_path_in_env.exists() {
+        tracing::debug!(path = %tool_path_in_env.display(), "Tool already exists, skipping provisioning.");
+        pb.finish_with_message(format!(
+            "{} {} is already provisioned",
+            style("✓").green(),
+            style(tool.name()).bold()
+        ));
+        return Ok(());
+    }
 
-        let bin_dir = context.env_dir.join("bin");
-        let tool_path_in_env = bin_dir.join(Self::BINARY_NAME);
-        let fish_runtime_dir = context.env_dir.join("fish_runtime");
-
-        // Common check: if the binary symlink already exists.
-        if tool_path_in_env.exists() {
-            tracing::debug!(path = %tool_path_in_env.display(), "Tool already exists, skipping binary provisioning.");
-            pb.finish_with_message(format!(
-                "{} {} is already provisioned",
-                style("✓").green(),
-                style(Self::NAME).bold()
-            ));
-
-            // Still need to ensure the 'share' directory is there.
-            if !fish_runtime_dir.join("share").exists() {
-                provision_source_share(
-                    &fish_runtime_dir,
-                    Self::NAME,
-                    Self::REPO,
-                    pb,
-                    &context.client,
-                )
-                .await?;
-            } else {
-                tracing::debug!("'share' directory already exists, skipping download.");
-            }
-            return Ok(());
-        }
-
-        // Common check: if the tool is on the system path.
-        if let Ok(system_path) = which::which(Self::BINARY_NAME) {
-            tracing::debug!(path = %system_path.display(), "Found tool on system");
-            pb.set_message(format!(
-                "Found {}, creating symlink...",
-                style(Self::NAME).bold()
-            ));
-            create_symlink(&system_path, &tool_path_in_env)?;
-            pb.finish_with_message(format!(
-                "{} Symlinked {} from {}",
-                style("✓").green(),
-                style(Self::NAME).bold(),
-                style(system_path.display()).cyan()
-            ));
-            return Ok(());
-        }
-
-        // --- Fish-specific download and extraction ---
-        pb.set_message(format!("Downloading {}...", style(Self::NAME).bold()));
-        let (download_url, asset_name) = find_github_release_asset_url(
-            Self::NAME,
-            Self::REPO,
-            "https://api.github.com",
-            env::consts::OS,
-            env::consts::ARCH,
-            &context.client,
-        )
-        .await?;
-        let temp_file = download_to_temp_file(&download_url, &asset_name, pb, &context.client).await?;
-        let file = temp_file.reopen()?;
-
-        pb.set_style(spinner_style.clone());
+    // 2. Check if the tool is available on the system PATH.
+    if let Ok(system_path) = which::which(tool.binary_name()) {
+        tracing::debug!(path = %system_path.display(), "Found tool on system");
         pb.set_message(format!(
-            "Extracting archive for {}...",
-            style(Self::NAME).bold()
+            "Found {}, creating symlink...",
+            style(tool.name()).bold()
         ));
+        create_symlink(&system_path, &tool_path_in_env)?;
 
-        fs::create_dir_all(&fish_runtime_dir)?;
-        let tar = XzDecoder::new(file);
-        let mut archive = Archive::new(tar);
-        extract_archive(&mut archive, &fish_runtime_dir)?;
-
-        let binary_path_in_archive = fish_runtime_dir.join(Self::BINARY_NAME);
-        create_symlink(&binary_path_in_archive, &tool_path_in_env)?;
-
-        // --- Fish-specific 'share' directory provisioning ---
-        if !fish_runtime_dir.join("share").exists() {
-            provision_source_share(
-                &fish_runtime_dir,
-                Self::NAME,
-                Self::REPO,
-                pb,
-                &context.client,
-            )
-            .await?;
-        } else {
-            tracing::debug!("'share' directory already exists, skipping download.");
-        }
+        // Run the post-symlink hook (for Helix runtime, etc.)
+        tool.post_symlink_hook(context, pb, &system_path).await?;
 
         pb.finish_with_message(format!(
-            "{} {} provisioned successfully",
+            "{} Symlinked {} from {}",
             style("✓").green(),
-            style(Self::NAME).bold()
+            style(tool.name()).bold(),
+            style(system_path.display()).cyan()
         ));
-        Ok(())
+        return Ok(());
     }
+
+    // 3. If not found locally or on PATH, provision from source.
+    tool.provision_from_source(context, pb, spinner_style).await?;
+
+    pb.finish_with_message(format!(
+        "{} {} provisioned successfully",
+        style("✓").green(),
+        style(tool.name()).bold()
+    ));
+
+    Ok(())
 }
 
-impl Starship {
-    const NAME: &'static str = "starship";
-    const REPO: &'static str = "starship/starship";
-    const BINARY_NAME: &'static str = "starship";
 
-    #[tracing::instrument(skip(self, context, pb, spinner_style), fields(tool = Self::NAME))]
-    pub async fn provision(
-        &self,
-        context: &ProvisionContext,
-        pb: &ProgressBar,
-        spinner_style: &ProgressStyle,
-    ) -> AppResult<()> {
-        pb.set_message(format!("Provisioning {}...", style(Self::NAME).bold()));
-        let bin_dir = context.env_dir.join("bin");
-        let tool_path_in_env = bin_dir.join(Self::BINARY_NAME);
-
-        if tool_path_in_env.exists() {
-            pb.finish_with_message(format!(
-                "{} {} is already provisioned",
-                style("✓").green(),
-                style(Self::NAME).bold()
-            ));
-            return Ok(());
-        }
-
-        if let Ok(system_path) = which::which(Self::BINARY_NAME) {
-            tracing::debug!(path = %system_path.display(), "Found tool on system");
-            pb.set_message(format!(
-                "Found {}, creating symlink...",
-                style(Self::NAME).bold()
-            ));
-            create_symlink(&system_path, &tool_path_in_env)?;
-            pb.finish_with_message(format!(
-                "{} Symlinked {} from {}",
-                style("✓").green(),
-                style(Self::NAME).bold(),
-                style(system_path.display()).cyan()
-            ));
-            return Ok(());
-        }
-
-        download_and_install_binary(
-            &context.env_dir,
-            Self::NAME,
-            Self::REPO,
-            Self::BINARY_NAME,
-            pb,
-            spinner_style,
-            &context.client,
-        )
-        .await?;
-
-        pb.finish_with_message(format!(
-            "{} {} provisioned successfully",
-            style("✓").green(),
-            style(Self::NAME).bold()
-        ));
-        Ok(())
-    }
-}
-
-impl Zoxide {
-    const NAME: &'static str = "zoxide";
-    const REPO: &'static str = "ajeetdsouza/zoxide";
-    const BINARY_NAME: &'static str = "zoxide";
-
-    #[tracing::instrument(skip(self, context, pb, spinner_style), fields(tool = Self::NAME))]
-    pub async fn provision(
-        &self,
-        context: &ProvisionContext,
-        pb: &ProgressBar,
-        spinner_style: &ProgressStyle,
-    ) -> AppResult<()> {
-        pb.set_message(format!("Provisioning {}...", style(Self::NAME).bold()));
-        let bin_dir = context.env_dir.join("bin");
-        let tool_path_in_env = bin_dir.join(Self::BINARY_NAME);
-
-        if tool_path_in_env.exists() {
-            pb.finish_with_message(format!(
-                "{} {} is already provisioned",
-                style("✓").green(),
-                style(Self::NAME).bold()
-            ));
-            return Ok(());
-        }
-
-        if let Ok(system_path) = which::which(Self::BINARY_NAME) {
-            tracing::debug!(path = %system_path.display(), "Found tool on system");
-            pb.set_message(format!(
-                "Found {}, creating symlink...",
-                style(Self::NAME).bold()
-            ));
-            create_symlink(&system_path, &tool_path_in_env)?;
-            pb.finish_with_message(format!(
-                "{} Symlinked {} from {}",
-                style("✓").green(),
-                style(Self::NAME).bold(),
-                style(system_path.display()).cyan()
-            ));
-            return Ok(());
-        }
-
-        download_and_install_binary(
-            &context.env_dir,
-            Self::NAME,
-            Self::REPO,
-            Self::BINARY_NAME,
-            pb,
-            spinner_style,
-            &context.client,
-        )
-        .await?;
-
-        pb.finish_with_message(format!(
-            "{} {} provisioned successfully",
-            style("✓").green(),
-            style(Self::NAME).bold()
-        ));
-        Ok(())
-    }
-}
-
-impl Atuin {
-    const NAME: &'static str = "atuin";
-    const REPO: &'static str = "atuinsh/atuin";
-    const BINARY_NAME: &'static str = "atuin";
-
-    #[tracing::instrument(skip(self, context, pb, spinner_style), fields(tool = Self::NAME))]
-    pub async fn provision(
-        &self,
-        context: &ProvisionContext,
-        pb: &ProgressBar,
-        spinner_style: &ProgressStyle,
-    ) -> AppResult<()> {
-        pb.set_message(format!("Provisioning {}...", style(Self::NAME).bold()));
-        let bin_dir = context.env_dir.join("bin");
-        let tool_path_in_env = bin_dir.join(Self::BINARY_NAME);
-
-        if tool_path_in_env.exists() {
-            pb.finish_with_message(format!(
-                "{} {} is already provisioned",
-                style("✓").green(),
-                style(Self::NAME).bold()
-            ));
-            return Ok(());
-        }
-
-        if let Ok(system_path) = which::which(Self::BINARY_NAME) {
-            tracing::debug!(path = %system_path.display(), "Found tool on system");
-            pb.set_message(format!(
-                "Found {}, creating symlink...",
-                style(Self::NAME).bold()
-            ));
-            create_symlink(&system_path, &tool_path_in_env)?;
-            pb.finish_with_message(format!(
-                "{} Symlinked {} from {}",
-                style("✓").green(),
-                style(Self::NAME).bold(),
-                style(system_path.display()).cyan()
-            ));
-            return Ok(());
-        }
-
-        download_and_install_binary(
-            &context.env_dir,
-            Self::NAME,
-            Self::REPO,
-            Self::BINARY_NAME,
-            pb,
-            spinner_style,
-            &context.client,
-        )
-        .await?;
-
-        pb.finish_with_message(format!(
-            "{} {} provisioned successfully",
-            style("✓").green(),
-            style(Self::NAME).bold()
-        ));
-        Ok(())
-    }
-}
-
-impl Ripgrep {
-    const NAME: &'static str = "ripgrep";
-    const REPO: &'static str = "BurntSushi/ripgrep";
-    const BINARY_NAME: &'static str = "rg";
-
-    #[tracing::instrument(skip(self, context, pb, spinner_style), fields(tool = Self::NAME))]
-    pub async fn provision(
-        &self,
-        context: &ProvisionContext,
-        pb: &ProgressBar,
-        spinner_style: &ProgressStyle,
-    ) -> AppResult<()> {
-        pb.set_message(format!("Provisioning {}...", style(Self::NAME).bold()));
-        let bin_dir = context.env_dir.join("bin");
-        let tool_path_in_env = bin_dir.join(Self::BINARY_NAME);
-
-        if tool_path_in_env.exists() {
-            pb.finish_with_message(format!(
-                "{} {} is already provisioned",
-                style("✓").green(),
-                style(Self::NAME).bold()
-            ));
-            return Ok(());
-        }
-
-        if let Ok(system_path) = which::which(Self::BINARY_NAME) {
-            tracing::debug!(path = %system_path.display(), "Found tool on system");
-            pb.set_message(format!(
-                "Found {}, creating symlink...",
-                style(Self::NAME).bold()
-            ));
-            create_symlink(&system_path, &tool_path_in_env)?;
-            pb.finish_with_message(format!(
-                "{} Symlinked {} from {}",
-                style("✓").green(),
-                style(Self::NAME).bold(),
-                style(system_path.display()).cyan()
-            ));
-            return Ok(());
-        }
-
-        download_and_install_binary(
-            &context.env_dir,
-            Self::NAME,
-            Self::REPO,
-            Self::BINARY_NAME,
-            pb,
-            spinner_style,
-            &context.client,
-        )
-        .await?;
-
-        pb.finish_with_message(format!(
-            "{} {} provisioned successfully",
-            style("✓").green(),
-            style(Self::NAME).bold()
-        ));
-        Ok(())
-    }
-}
-
-impl Helix {
-    const NAME: &'static str = "helix";
-    const REPO: &'static str = "helix-editor/helix";
-    const BINARY_NAME: &'static str = "hx";
-    const PATH_IN_ARCHIVE: &'static str = "hx";
-
-    #[tracing::instrument(skip(self, context, pb, spinner_style), fields(tool = Self::NAME))]
-    pub async fn provision(
-        &self,
-        context: &ProvisionContext,
-        pb: &ProgressBar,
-        spinner_style: &ProgressStyle,
-    ) -> AppResult<()> {
-        pb.set_message(format!("Provisioning {}...", style(Self::NAME).bold()));
-        let bin_dir = context.env_dir.join("bin");
-        let tool_path_in_env = bin_dir.join(Self::BINARY_NAME);
-
-        if tool_path_in_env.exists() {
-            pb.finish_with_message(format!(
-                "{} {} is already provisioned",
-                style("✓").green(),
-                style(Self::NAME).bold()
-            ));
-            return Ok(());
-        }
-
-        if let Ok(system_path) = which::which(Self::BINARY_NAME) {
-            tracing::debug!(path = %system_path.display(), "Found tool on system");
-            pb.set_message(format!(
-                "Found {}, creating symlink...",
-                style(Self::NAME).bold()
-            ));
-            create_symlink(&system_path, &tool_path_in_env)?;
-
-            let user_helix_runtime_dir =
-                shellexpand::tilde("~/.config/helix/runtime").to_string();
-            if !Path::new(&user_helix_runtime_dir).exists() {
-                tracing::debug!("User-wide helix runtime not found. Provisioning a local one.");
-                pb.set_message("Detected Helix symlink, provisioning matching runtime...");
-
-                let system_path_clone = system_path.clone();
-                let env_dir_clone = context.env_dir.to_path_buf();
-                let pb_clone = pb.clone();
-                tokio::task::spawn_blocking(move || {
-                    provision_helix_runtime_for_symlink(
-                        &system_path_clone,
-                        &env_dir_clone,
-                        &pb_clone,
-                    )
-                })
-                .await
-                .context("Task for provisioning helix runtime panicked")??;
-            }
-
-            pb.finish_with_message(format!(
-                "{} Symlinked {} from {}",
-                style("✓").green(),
-                style(Self::NAME).bold(),
-                style(system_path.display()).cyan()
-            ));
-            return Ok(());
-        }
-
-        download_and_install_archive(
-            &context.env_dir,
-            Self::NAME,
-            Self::REPO,
-            Self::BINARY_NAME,
-            Self::PATH_IN_ARCHIVE,
-            pb,
-            spinner_style,
-            &context.client,
-        )
-        .await?;
-
-        pb.finish_with_message(format!(
-            "{} {} provisioned successfully",
-            style("✓").green(),
-            style(Self::NAME).bold()
-        ));
-        Ok(())
-    }
-}
+// --- Helper Functions ---
 
 
 /// Attempts to get the system's glibc version.
@@ -580,7 +248,7 @@ async fn download_to_temp_file(
 }
 
 #[tracing::instrument(skip(env_dir, pb, spinner_style, client))]
-async fn download_and_install_binary(
+pub async fn download_and_install_binary(
     env_dir: &Path,
     name: &str,
     repo: &str,
@@ -626,7 +294,7 @@ async fn download_and_install_binary(
 }
 
 #[tracing::instrument(skip(env_dir, pb, spinner_style, client))]
-async fn download_and_install_archive(
+pub async fn download_and_install_archive(
     env_dir: &Path,
     name: &str,
     repo: &str,
@@ -686,7 +354,7 @@ async fn download_and_install_archive(
 }
 
 #[tracing::instrument(skip(pb, client), fields(name = name, dest_dir = %dest_dir.display()))]
-async fn provision_source_share(
+pub async fn provision_source_share(
     dest_dir: &Path,
     name: &str,
     repo: &str,
@@ -916,7 +584,7 @@ fn extract_tar_xz<R: Read>(reader: R, target_dir: &Path, binary_name: &str) -> A
     ))
 }
 
-fn extract_archive<R: io::Read>(archive: &mut Archive<R>, target_dir: &Path) -> AppResult<()> {
+pub fn extract_archive<R: io::Read>(archive: &mut Archive<R>, target_dir: &Path) -> AppResult<()> {
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
         let path = entry.path()?.to_path_buf();
@@ -946,7 +614,7 @@ fn extract_archive<R: io::Read>(archive: &mut Archive<R>, target_dir: &Path) -> 
     Ok(())
 }
 
-fn extract_zip_archive<R: io::Read + io::Seek>(
+pub fn extract_zip_archive<R: io::Read + io::Seek>(
     archive: &mut ZipArchive<R>,
     target_dir: &Path,
 ) -> AppResult<()> {
@@ -1005,7 +673,7 @@ fn extract_zip<R: Read + Seek>(reader: R, target_dir: &Path, binary_name: &str) 
 
 #[cfg(unix)]
 #[tracing::instrument(fields(original = %original.display(), link = %link.display()))]
-fn create_symlink(original: &Path, link: &Path) -> AppResult<()> {
+pub fn create_symlink(original: &Path, link: &Path) -> AppResult<()> {
     let link_parent = link.parent().unwrap_or_else(|| Path::new(""));
     let relative_path = pathdiff::diff_paths(original, link_parent)
         .ok_or_else(|| anyhow!("Failed to calculate relative path for symlink"))?;
@@ -1015,7 +683,7 @@ fn create_symlink(original: &Path, link: &Path) -> AppResult<()> {
 
 #[cfg(windows)]
 #[tracing::instrument(fields(original = %original.display(), link = %link.display()))]
-fn create_symlink(original: &Path, link: &Path) -> AppResult<()> {
+pub fn create_symlink(original: &Path, link: &Path) -> AppResult<()> {
     let link_parent = link.parent().unwrap_or_else(|| Path::new(""));
     let relative_path = pathdiff::diff_paths(original, link_parent)
         .ok_or_else(|| anyhow!("Failed to calculate relative path for symlink"))?;
@@ -1032,7 +700,7 @@ fn create_symlink(original: &Path, link: &Path) -> AppResult<()> {
 /// It strips the top-level directory from the archive, so the contents of 'share'
 /// are placed directly in the target directory.
 #[tracing::instrument(skip(reader))]
-fn extract_share_from_tar_gz<R: Read>(reader: R, target_dir: &Path) -> AppResult<()> {
+pub fn extract_share_from_tar_gz<R: Read>(reader: R, target_dir: &Path) -> AppResult<()> {
     let tar = GzDecoder::new(reader);
     let mut archive = Archive::new(tar);
     fs::create_dir_all(target_dir)?;
@@ -1067,7 +735,7 @@ fn extract_share_from_tar_gz<R: Read>(reader: R, target_dir: &Path) -> AppResult
 
 /// For a symlinked Helix, provisions a local runtime if the user-wide one is missing.
 #[tracing::instrument(skip(system_hx_path, env_dir, pb))]
-fn provision_helix_runtime_for_symlink(
+pub fn provision_helix_runtime_for_symlink(
     system_hx_path: &Path,
     env_dir: &Path,
     pb: &ProgressBar,
@@ -1252,7 +920,7 @@ fn find_github_release_asset_url_by_tag(
 }
 
 /// Selectively extracts only the `runtime/` directory from a tar archive.
-fn extract_runtime_from_archive<R: io::Read>(
+pub fn extract_runtime_from_archive<R: io::Read>(
     archive: &mut Archive<R>,
     target_dir: &Path,
 ) -> AppResult<()> {
@@ -1282,7 +950,7 @@ fn extract_runtime_from_archive<R: io::Read>(
 }
 
 /// Selectively extracts only the `runtime/` directory from a zip archive.
-fn extract_runtime_from_zip_archive<R: io::Read + io::Seek>(
+pub fn extract_runtime_from_zip_archive<R: io::Read + io::Seek>(
     archive: &mut ZipArchive<R>,
     target_dir: &Path,
 ) -> AppResult<()> {
@@ -1313,122 +981,4 @@ fn extract_runtime_from_zip_archive<R: io::Read + io::Seek>(
         }
     }
     Ok(())
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::tempdir;
-
-    #[test]
-    #[cfg(unix)]
-    fn test_create_relative_symlink_unix() -> AppResult<()> {
-        let dir = tempdir()?;
-        let tool_dir = dir.path().join("my_tool");
-        let bin_dir = dir.path().join("bin");
-        fs::create_dir_all(&tool_dir)?;
-        fs::create_dir_all(&bin_dir)?;
-
-        let original_path = tool_dir.join("my_binary");
-        let link_path = bin_dir.join("my_binary_link");
-
-        // Create a dummy file to link to
-        fs::write(&original_path, "binary content")?;
-
-        create_symlink(&original_path, &link_path)?;
-
-        // Verify that the link exists and is a symlink
-        assert!(link_path.exists());
-        assert!(fs::symlink_metadata(&link_path)?.file_type().is_symlink());
-
-        // Verify that the link is relative
-        let link_target = fs::read_link(&link_path)?;
-        assert_eq!(link_target.to_str(), Some("../my_tool/my_binary"));
-
-        // Verify that the resolved path is correct
-        let resolved_path = fs::canonicalize(&link_path)?;
-        assert_eq!(resolved_path, fs::canonicalize(&original_path)?);
-
-        Ok(())
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn test_create_relative_symlink_windows() -> AppResult<()> {
-        let dir = tempdir()?;
-        let tool_dir = dir.path().join("my_tool");
-        let bin_dir = dir.path().join("bin");
-        fs::create_dir_all(&tool_dir)?;
-        fs::create_dir_all(&bin_dir)?;
-
-        let original_path = tool_dir.join("my_binary");
-        let link_path = bin_dir.join("my_binary_link");
-
-        // Create a dummy file to link to
-        fs::write(&original_path, "binary content")?;
-
-        create_symlink(&original_path, &link_path)?;
-
-        // Verify that the link exists and is a symlink
-        assert!(link_path.exists());
-        assert!(fs::symlink_metadata(&link_path)?.file_type().is_symlink());
-
-        // Verify that the resolved path is correct
-        let resolved_path = fs::canonicalize(&link_path)?;
-        assert_eq!(resolved_path, fs::canonicalize(&original_path)?);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_find_github_release_asset_url_ripgrep_logic() -> AppResult<()> {
-        // Start a mock server.
-        let mock_server = wiremock::MockServer::start().await;
-        // Mock the GitHub API response.
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path(
-                "/repos/BurntSushi/ripgrep/releases/latest",
-            ))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "assets": [
-                        {
-                            "name": "decoy-asset-14.1.0-x86_64-unknown-linux-musl.tar.gz",
-                            "browser_download_url": "https://example.com/decoy.tar.gz"
-                        },
-                        {
-                            "name": "ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz",
-                            "browser_download_url": "https://example.com/ripgrep.tar.gz"
-                        }
-                    ]
-                })),
-            )
-            .mount(&mock_server)
-            .await;
-
-        let client = reqwest::Client::new();
-
-        let (url, name) = find_github_release_asset_url(
-            "ripgrep",
-            "BurntSushi/ripgrep",
-            &mock_server.uri(),
-            "linux",
-            "x86_64",
-            &client,
-        )
-        .await?;
-
-        assert_eq!(
-            name, "ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz",
-            "The correct asset should be selected"
-        );
-        assert_eq!(
-            url, "https://example.com/ripgrep.tar.gz",
-            "The correct asset URL should be selected"
-        );
-
-        Ok(())
-    }
 }

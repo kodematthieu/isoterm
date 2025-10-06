@@ -3,13 +3,19 @@ mod config;
 mod error;
 mod provision;
 
-use crate::cli::Cli;
-use crate::error::AppResult;
+use crate::{
+    cli::Cli,
+    error::AppResult,
+    provision::{
+        atuin::Atuin, fish::Fish, helix::Helix, provision_tool, ripgrep::Ripgrep,
+        starship::Starship, zoxide::Zoxide, ProvisionContext,
+    },
+};
 use anyhow::Context;
 use clap::Parser;
 use console::style;
 use futures::future::try_join_all;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle, ProgressDrawTarget};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -94,7 +100,7 @@ async fn run() -> AppResult<()> {
             tool_progress_bars;
 
         // --- Spawn all provisioning tasks ---
-        let context = provision::ProvisionContext {
+        let context = ProvisionContext {
             env_dir: env_dir.clone(),
             client,
         };
@@ -103,32 +109,32 @@ async fn run() -> AppResult<()> {
             tokio::spawn({
                 let context = context.clone();
                 let style = spinner_style.clone();
-                async move { provision::Fish.provision(&context, &pb_fish, &style).await }
+                async move { provision_tool(Fish, &context, &pb_fish, &style).await }
             }),
             tokio::spawn({
                 let context = context.clone();
                 let style = spinner_style.clone();
-                async move { provision::Starship.provision(&context, &pb_starship, &style).await }
+                async move { provision_tool(Starship, &context, &pb_starship, &style).await }
             }),
             tokio::spawn({
                 let context = context.clone();
                 let style = spinner_style.clone();
-                async move { provision::Zoxide.provision(&context, &pb_zoxide, &style).await }
+                async move { provision_tool(Zoxide, &context, &pb_zoxide, &style).await }
             }),
             tokio::spawn({
                 let context = context.clone();
                 let style = spinner_style.clone();
-                async move { provision::Atuin.provision(&context, &pb_atuin, &style).await }
+                async move { provision_tool(Atuin, &context, &pb_atuin, &style).await }
             }),
             tokio::spawn({
                 let context = context.clone();
                 let style = spinner_style.clone();
-                async move { provision::Ripgrep.provision(&context, &pb_ripgrep, &style).await }
+                async move { provision_tool(Ripgrep, &context, &pb_ripgrep, &style).await }
             }),
             tokio::spawn({
                 let context = context.clone();
                 let style = spinner_style.clone();
-                async move { provision::Helix.provision(&context, &pb_helix, &style).await }
+                async move { provision_tool(Helix, &context, &pb_helix, &style).await }
             }),
         ];
 

@@ -91,7 +91,7 @@ fn test_logging_vv() {
     let (_stdout, stderr) = run_isoterm_with_args(&["-vv"]);
     assert!(stderr.contains("Starting environment setup"));
     // With -vv, isoterm logs at debug level. The provisioner should log this.
-    assert!(stderr.contains("Tool already exists, skipping binary provisioning."));
+    assert!(stderr.contains("Tool already exists, skipping provisioning."));
     assert!(!stderr.contains("Created bin directory"));
 }
 
@@ -99,7 +99,7 @@ fn test_logging_vv() {
 fn test_logging_vvv() {
     let (_stdout, stderr) = run_isoterm_with_args(&["-vvv"]);
     assert!(stderr.contains("Starting environment setup"));
-    assert!(stderr.contains("Tool already exists, skipping binary provisioning."));
+    assert!(stderr.contains("Tool already exists, skipping provisioning."));
     // With -vvv, isoterm logs at trace level.
     assert!(stderr.contains("Created bin directory"));
 }
@@ -108,6 +108,6 @@ fn test_logging_vvv() {
 fn test_logging_vvvv() {
     let (_stdout, stderr) = run_isoterm_with_args(&["-vvvv"]);
     assert!(stderr.contains("Starting environment setup"));
-    assert!(stderr.contains("Tool already exists, skipping binary provisioning."));
+    assert!(stderr.contains("Tool already exists, skipping provisioning."));
     assert!(stderr.contains("Created bin directory"));
 }
