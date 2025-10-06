@@ -157,8 +157,15 @@ async fn run() -> AppResult<()> {
         let results = try_join_all(tasks)
             .await
             .context("A provisioning task panicked or was cancelled")?;
+
         for result in results {
-            result.context("A provisioning task returned an error")?;
+            if let Err(e) = result {
+                // Log the specific error to stderr for the user to see.
+                // The `overall_pb` is used to ensure the message is printed correctly
+                // within the MultiProgress bar context.
+                let warning_msg = format!("{} {}", style("Warning:").yellow().bold(), e);
+                overall_pb.println(warning_msg);
+            }
         }
 
         // --- Configuration Step ---

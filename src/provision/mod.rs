@@ -560,10 +560,11 @@ fn find_best_asset_match(
             }
         }
         "android" => {
-            // Android does not use glibc, so musl is generally the better choice if available.
+            // Android does not use glibc, so musl is the only viable choice.
             match name {
                 "fish" | "helix" => vec!["linux"],
-                _ => vec!["unknown-linux-musl", "unknown-linux-gnu"],
+                // Do not allow "unknown-linux-gnu" on Android.
+                _ => vec!["unknown-linux-musl"],
             }
         }
         "macos" => vec!["apple-darwin"],
