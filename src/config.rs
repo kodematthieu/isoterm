@@ -1,6 +1,5 @@
 use crate::error::AppResult;
 use anyhow::{Context, anyhow};
-use console::style;
 use indicatif::ProgressBar;
 use std::fs;
 use std::path::Path;
@@ -10,9 +9,6 @@ use std::process::Command;
 #[tracing::instrument(skip(pb), fields(env_dir = %env_dir.display()))]
 pub async fn generate_configs(env_dir: &Path, pb: &ProgressBar) -> AppResult<()> {
     pb.set_message("Generating configuration files...");
-
-    let config_dir = env_dir.join("config");
-    fs::create_dir_all(&config_dir).context("Failed to create config directory")?;
 
     // Generate activate.sh
     write_activate_script(env_dir)?;
@@ -29,24 +25,35 @@ pub async fn generate_configs(env_dir: &Path, pb: &ProgressBar) -> AppResult<()>
     // Generate helix config
     write_helix_config(env_dir)?;
 
-    pb.finish_with_message(format!(
-        "{} Generated configuration files",
-        style("✓").green()
-    ));
     Ok(())
+}
+
+/// A helper to write a config file, creating parent directories if they don't exist.
+fn write_config_file(env_dir: &Path, relative_path: &str, content: &str) -> AppResult<()> {
+    let final_path = env_dir.join(relative_path);
+    if let Some(parent_dir) = final_path.parent() {
+        fs::create_dir_all(parent_dir).with_context(|| {
+            format!(
+                "Failed to create parent directory for {}",
+                final_path.display()
+            )
+        })?;
+    }
+    tracing::trace!(path = %final_path.display(), "Writing config file");
+    fs::write(&final_path, content)
+        .with_context(|| format!("Failed to write {}", final_path.display()))
 }
 
 /// Creates the main `activate.sh` script for the environment.
 #[tracing::instrument(fields(env_dir = %env_dir.display()))]
 fn write_activate_script(env_dir: &Path) -> AppResult<()> {
     let script_content = include_str!("../templates/activate.sh");
-    let script_path = env_dir.join("activate.sh");
-    tracing::trace!(path = %script_path.display(), "Writing activate script");
-    fs::write(&script_path, script_content).context("Failed to write activate.sh")?;
+    write_config_file(env_dir, "activate.sh", script_content)?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let script_path = env_dir.join("activate.sh");
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))?;
     }
 
@@ -56,15 +63,8 @@ fn write_activate_script(env_dir: &Path) -> AppResult<()> {
 /// Creates the `config.fish` file with initialization commands.
 #[tracing::instrument(fields(env_dir = %env_dir.display()))]
 fn write_fish_config(env_dir: &Path) -> AppResult<()> {
-    let fish_config_dir = env_dir.join("config").join("fish");
-    fs::create_dir_all(&fish_config_dir).context("Failed to create fish config directory")?;
-
     let config_content = include_str!("../templates/config.fish");
-
-    let config_path = fish_config_dir.join("config.fish");
-    tracing::trace!(path = %config_path.display(), "Writing fish config");
-    fs::write(&config_path, config_content).context("Failed to write config.fish")?;
-    Ok(())
+    write_config_file(env_dir, "config/fish/config.fish", config_content)
 }
 
 /// Creates a default `starship.toml` configuration using `starship preset`.
@@ -96,6 +96,7 @@ fn write_starship_config(env_dir: &Path) -> AppResult<()> {
 /// Creates a default `atuin/config.toml` configuration.
 #[tracing::instrument(fields(env_dir = %env_dir.display()))]
 fn write_atuin_config(env_dir: &Path) -> AppResult<()> {
+    // Ensure the data directory exists first.
     let atuin_data_dir = env_dir.join("data").join("atuin");
     fs::create_dir_all(&atuin_data_dir).context("Failed to create atuin data directory")?;
 
@@ -107,31 +108,18 @@ fn write_atuin_config(env_dir: &Path) -> AppResult<()> {
     let template_content = include_str!("../templates/atuin/config.toml.template");
     let config_content = template_content.replace("${DB_PATH}$", &db_path_str.replace('\\', "/"));
 
-    let atuin_config_dir = env_dir.join("config").join("atuin");
-    fs::create_dir_all(&atuin_config_dir)?;
-    let config_path = atuin_config_dir.join("config.toml");
-    tracing::trace!(path = %config_path.display(), "Writing atuin config");
-    fs::write(&config_path, config_content).context("Failed to write atuin/config.toml")?;
-
-    Ok(())
+    write_config_file(env_dir, "config/atuin/config.toml", &config_content)
 }
 
 #[tracing::instrument(fields(env_dir = %env_dir.display()))]
 fn write_helix_config(env_dir: &Path) -> AppResult<()> {
-    let helix_config_dir = env_dir.join("config").join("helix");
-    fs::create_dir_all(&helix_config_dir).context("Failed to create helix config directory")?;
-
-    let config_toml_path = helix_config_dir.join("config.toml");
     let config_toml_content = include_str!("../templates/helix/config.toml");
-    tracing::trace!(path = %config_toml_path.display(), "Writing helix config.toml");
-    fs::write(&config_toml_path, config_toml_content)
-        .context("Failed to write helix/config.toml")?;
+    write_config_file(env_dir, "config/helix/config.toml", config_toml_content)?;
 
-    let languages_toml_path = helix_config_dir.join("languages.toml");
     let languages_toml_content = include_str!("../templates/helix/languages.toml");
-    tracing::trace!(path = %languages_toml_path.display(), "Writing helix languages.toml");
-    fs::write(&languages_toml_path, languages_toml_content)
-        .context("Failed to write helix/languages.toml")?;
-
-    Ok(())
+    write_config_file(
+        env_dir,
+        "config/helix/languages.toml",
+        languages_toml_content,
+    )
 }
