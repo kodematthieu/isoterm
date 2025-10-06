@@ -86,9 +86,7 @@ async fn run() -> AppResult<()> {
         tracing::trace!(path = %data_dir.display(), "Created data directory");
 
         // --- Overall Progress Bar ---
-        let tools_to_provision = [
-            "fish", "starship", "zoxide", "atuin", "ripgrep", "helix",
-        ];
+        let tools_to_provision = ["fish", "starship", "zoxide", "atuin", "ripgrep", "helix"];
         let total_steps = (tools_to_provision.len() + 1) as u64; // Tools + config step
 
         let overall_pb = mp.add(ProgressBar::new(total_steps));

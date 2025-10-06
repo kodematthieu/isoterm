@@ -1,5 +1,5 @@
 use crate::error::AppResult;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use indicatif::ProgressBar;
 use std::fs;
 use std::path::Path;
@@ -29,11 +29,7 @@ pub async fn generate_configs(env_dir: &Path, pb: &ProgressBar) -> AppResult<()>
 }
 
 /// A helper to write a config file, creating parent directories if they don't exist.
-fn write_config_file(
-    env_dir: &Path,
-    relative_path: &str,
-    content: &str,
-) -> AppResult<()> {
+fn write_config_file(env_dir: &Path, relative_path: &str, content: &str) -> AppResult<()> {
     let final_path = env_dir.join(relative_path);
     if let Some(parent_dir) = final_path.parent() {
         fs::create_dir_all(parent_dir).with_context(|| {
@@ -44,7 +40,8 @@ fn write_config_file(
         })?;
     }
     tracing::trace!(path = %final_path.display(), "Writing config file");
-    fs::write(&final_path, content).with_context(|| format!("Failed to write {}", final_path.display()))
+    fs::write(&final_path, content)
+        .with_context(|| format!("Failed to write {}", final_path.display()))
 }
 
 /// Creates the main `activate.sh` script for the environment.
@@ -67,11 +64,7 @@ fn write_activate_script(env_dir: &Path) -> AppResult<()> {
 #[tracing::instrument(fields(env_dir = %env_dir.display()))]
 fn write_fish_config(env_dir: &Path) -> AppResult<()> {
     let config_content = include_str!("../templates/config.fish");
-    write_config_file(
-        env_dir,
-        "config/fish/config.fish",
-        config_content,
-    )
+    write_config_file(env_dir, "config/fish/config.fish", config_content)
 }
 
 /// Creates a default `starship.toml` configuration using `starship preset`.
@@ -115,21 +108,13 @@ fn write_atuin_config(env_dir: &Path) -> AppResult<()> {
     let template_content = include_str!("../templates/atuin/config.toml.template");
     let config_content = template_content.replace("${DB_PATH}$", &db_path_str.replace('\\', "/"));
 
-    write_config_file(
-        env_dir,
-        "config/atuin/config.toml",
-        &config_content,
-    )
+    write_config_file(env_dir, "config/atuin/config.toml", &config_content)
 }
 
 #[tracing::instrument(fields(env_dir = %env_dir.display()))]
 fn write_helix_config(env_dir: &Path) -> AppResult<()> {
     let config_toml_content = include_str!("../templates/helix/config.toml");
-    write_config_file(
-        env_dir,
-        "config/helix/config.toml",
-        config_toml_content,
-    )?;
+    write_config_file(env_dir, "config/helix/config.toml", config_toml_content)?;
 
     let languages_toml_content = include_str!("../templates/helix/languages.toml");
     write_config_file(

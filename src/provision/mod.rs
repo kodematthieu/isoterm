@@ -240,7 +240,8 @@ impl<'a> DownloadManager<'a> {
 
         self.pb.set_style(download_style);
         self.pb.set_length(total_size);
-        self.pb.set_message(format!("Downloading {}", style(asset_name).cyan()));
+        self.pb
+            .set_message(format!("Downloading {}", style(asset_name).cyan()));
         Ok(())
     }
 
@@ -333,8 +334,7 @@ pub async fn provision_from_github_release<'a>(
     .await?;
 
     // 2. Download to a temp file
-    let temp_file =
-        download_to_temp_file(&download_url, &asset_name, pb, &context.client).await?;
+    let temp_file = download_to_temp_file(&download_url, &asset_name, pb, &context.client).await?;
     let file = temp_file.reopen()?;
     let archive_type = ArchiveType::from_asset_name(&asset_name)?;
 
@@ -492,7 +492,6 @@ async fn find_release_asset(
     result.map_err(|e| anyhow!(e))
 }
 
-
 /// The core asset-matching logic, extracted into a synchronous function
 /// so it can be shared by both async and blocking API callers.
 fn find_best_asset_match(
@@ -517,12 +516,17 @@ fn find_best_asset_match(
                     if (major, minor) < MIN_GLIBC_VERSION {
                         tracing::info!(
                             "System glibc version {}.{} is older than required {}.{}. Prioritizing musl build.",
-                            major, minor, MIN_GLIBC_VERSION.0, MIN_GLIBC_VERSION.1
+                            major,
+                            minor,
+                            MIN_GLIBC_VERSION.0,
+                            MIN_GLIBC_VERSION.1
                         );
                         gnu_preferred = false;
                     }
                 } else {
-                    tracing::warn!("Could not determine glibc version. Defaulting to musl for safety.");
+                    tracing::warn!(
+                        "Could not determine glibc version. Defaulting to musl for safety."
+                    );
                     gnu_preferred = false; // Default to safer musl if check fails
                 }
             }
@@ -540,7 +544,7 @@ fn find_best_asset_match(
         }
         "android" => {
             // Android does not use glibc, so musl is generally the better choice if available.
-             match name {
+            match name {
                 "fish" | "helix" => vec!["linux"],
                 _ => vec!["unknown-linux-musl", "unknown-linux-gnu"],
             }
@@ -594,7 +598,6 @@ fn find_best_asset_match(
         name, os, arch
     ))
 }
-
 
 #[tracing::instrument(skip(client), fields(repo = repo, os = os, arch = arch))]
 async fn find_github_release_asset_url(
@@ -654,7 +657,11 @@ fn extract_single_file_from_archive<R: Read + Seek>(
             let mut archive = Archive::new(tar);
             for entry in archive.entries()? {
                 let mut entry = entry?;
-                if entry.path()?.file_name().map_or(false, |n| n == binary_name) {
+                if entry
+                    .path()?
+                    .file_name()
+                    .map_or(false, |n| n == binary_name)
+                {
                     entry.unpack(&target_path)?;
                     return Ok(());
                 }
@@ -665,7 +672,11 @@ fn extract_single_file_from_archive<R: Read + Seek>(
             let mut archive = Archive::new(tar);
             for entry in archive.entries()? {
                 let mut entry = entry?;
-                if entry.path()?.file_name().map_or(false, |n| n == binary_name) {
+                if entry
+                    .path()?
+                    .file_name()
+                    .map_or(false, |n| n == binary_name)
+                {
                     entry.unpack(&target_path)?;
                     return Ok(());
                 }
@@ -772,7 +783,6 @@ pub fn extract_full_archive<R: Read + Seek>(
     }
     Ok(())
 }
-
 
 #[cfg(unix)]
 #[tracing::instrument(fields(original = %original.display(), link = %link.display()))]
@@ -957,8 +967,9 @@ pub fn extract_sub_directory<R: Read + Seek>(
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i)?;
                 if let Some(enclosed_name) = file.enclosed_name() {
-                    if let Some(sub_dir_index) =
-                        enclosed_name.to_str().and_then(|s| s.find(&sub_dir_pattern))
+                    if let Some(sub_dir_index) = enclosed_name
+                        .to_str()
+                        .and_then(|s| s.find(&sub_dir_pattern))
                     {
                         // Get the path relative to the inside of the sub_dir.
                         // e.g., for "themes/catppuccin.toml" inside "runtime", this is what we get.
