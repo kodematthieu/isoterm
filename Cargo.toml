@@ -26,6 +26,7 @@ regex = "1.10.5"
 zip = "5.1.1"
 futures = "0.3.31"
 tokio-retry = "0.3.0"
+thiserror = "2.0.17"
 
 [target.'aarch64-linux-android'.dependencies.reqwest]
 version = "0.12.23"

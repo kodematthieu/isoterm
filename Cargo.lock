@@ -1003,7 +1003,7 @@ checksum = "7943c866cc5cd64cbc25b2e01621d07fa8eb2a1a23160ee81ce38704e97b8ecf"
 
 [[package]]
 name = "isoterm"
-version = "0.1.0-dev.2"
+version = "0.1.0-dev.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1020,6 +1020,7 @@ dependencies = [
  "shellexpand",
  "tar",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-retry",
  "tracing",

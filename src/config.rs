@@ -1,4 +1,4 @@
-use crate::{error::AppResult, provision::create_symlink};
+use crate::{error::{AppResult, UserError}, provision::create_symlink};
 use anyhow::{anyhow, Context};
 use indicatif::ProgressBar;
 use std::{collections::HashSet, fs, path::Path, process::Command};
@@ -80,18 +80,22 @@ fn write_starship_config(env_dir: &Path) -> AppResult<()> {
 
     tracing::trace!(path = %config_path.display(), "Generating starship config");
 
-    let status = Command::new(&starship_bin)
+    let output = Command::new(&starship_bin)
         .arg("preset")
         .arg("no-empty-icons")
         .arg("-o")
         .arg(&config_path)
-        .status()
-        .context("Failed to execute starship preset command")?;
+        .output()
+        .map_err(|e| UserError::CommandFailed {
+            command: "starship preset".to_string(),
+            source: e,
+        })?;
 
-    if !status.success() {
+    if !output.status.success() {
         return Err(anyhow!(
-            "starship preset command failed with status: {}",
-            status
+            "starship preset command failed with status: {}. Stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
         ));
     }
 

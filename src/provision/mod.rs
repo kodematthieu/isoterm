@@ -1,5 +1,5 @@
-use crate::error::AppResult;
-use anyhow::{Context, anyhow};
+use crate::error::{AppResult, UserError};
+use anyhow::{anyhow, Context};
 use console::style;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
@@ -226,7 +226,7 @@ struct DownloadManager<'a> {
 
 impl<'a> DownloadManager<'a> {
     /// Creates a new DownloadManager.
-    fn new(pb: &'a ProgressBar) -> AppResult<Self> {
+    fn new(pb: &'a ProgressBar) -> io::Result<Self> {
         let temp_file = NamedTempFile::new()?;
         Ok(Self { pb, temp_file })
     }
@@ -246,7 +246,7 @@ impl<'a> DownloadManager<'a> {
     }
 
     /// Writes a chunk of bytes to the temporary file and updates the progress bar.
-    fn write_chunk(&mut self, chunk: &[u8]) -> AppResult<()> {
+    fn write_chunk(&mut self, chunk: &[u8]) -> io::Result<()> {
         self.temp_file.write_all(chunk)?;
         self.pb.inc(chunk.len() as u64);
         Ok(())
@@ -267,35 +267,50 @@ async fn download_to_temp_file(
 ) -> AppResult<NamedTempFile> {
     let retry_strategy = ExponentialBackoff::from_millis(500).map(jitter).take(3);
 
-    let result = Retry::spawn(retry_strategy, || async {
-        pb.set_position(0);
+    let url_owned = url.to_string();
+    let asset_name_owned = asset_name.to_string();
 
-        let response = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .error_for_status()
-            .map_err(|e| e.to_string())?;
-        let total_size = response.content_length().unwrap_or(0);
+    Retry::spawn(retry_strategy, || {
+        let url = url_owned.clone();
+        let asset_name = asset_name_owned.clone();
+        async move {
+            pb.set_position(0);
 
-        let mut manager = DownloadManager::new(pb).map_err(|e| e.to_string())?;
-        manager
-            .setup_progress_bar(asset_name, total_size)
-            .map_err(|e| e.to_string())?;
+            let response = client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| UserError::DownloadFailed {
+                    url: url.clone(),
+                    source: e,
+                })?
+                .error_for_status()
+                .map_err(|e| UserError::DownloadFailed {
+                    url: url.clone(),
+                    source: e,
+                })?;
+            let total_size = response.content_length().unwrap_or(0);
 
-        let mut stream = response.bytes_stream();
+            let map_io_err = |source| UserError::ArchiveExtractionFailed { source };
+            let mut manager = DownloadManager::new(pb).map_err(map_io_err)?;
+            manager
+                .setup_progress_bar(&asset_name, total_size)
+                .map_err(|e| anyhow!("Failed to set up progress bar: {}", e))?;
 
-        while let Some(item) = stream.next().await {
-            let chunk = item.map_err(|e| format!("Failed to read download chunk: {}", e))?;
-            manager.write_chunk(&chunk).map_err(|e| e.to_string())?;
+            let mut stream = response.bytes_stream();
+
+            while let Some(item) = stream.next().await {
+                let chunk = item.map_err(|e| UserError::DownloadFailed {
+                    url: url.clone(),
+                    source: e,
+                })?;
+                manager.write_chunk(&chunk).map_err(map_io_err)?;
+            }
+
+            Ok(manager.finish())
         }
-
-        Ok(manager.finish())
     })
-    .await;
-
-    result.map_err(|e: String| anyhow!(e))
+    .await
 }
 
 /// Defines how a downloaded archive should be processed.
@@ -407,27 +422,29 @@ async fn find_github_source_tarball_url(
 ) -> AppResult<(String, String)> {
     let retry_strategy = ExponentialBackoff::from_millis(500).map(jitter).take(3);
 
-    let result = Retry::spawn(retry_strategy, || async {
+    Retry::spawn(retry_strategy, || async {
         let repo_url = format!("{}/repos/{}/releases/latest", base_url, repo);
         tracing::debug!(url = %repo_url, "Fetching latest release from GitHub API");
 
-        let response: Value = client
+        let response = client
             .get(&repo_url)
             .send()
             .await
-            .map_err(|e| format!("Failed to query GitHub API: {}", e))?
+            .map_err(|e| UserError::GitHubApiError { source: e })?;
+
+        let response_value: Value = response
             .json()
             .await
-            .map_err(|e| format!("Failed to parse JSON response from GitHub API: {}", e))?;
+            .map_err(|e| UserError::GitHubApiError { source: e })?;
 
-        let tarball_url = response["tarball_url"].as_str().ok_or_else(|| {
-            format!(
+        let tarball_url = response_value["tarball_url"].as_str().ok_or_else(|| {
+            anyhow!(
                 "No 'tarball_url' found in release for {}. The API response may have changed.",
                 repo
             )
         })?;
 
-        let tag_name = response["tag_name"]
+        let tag_name = response_value["tag_name"]
             .as_str()
             .unwrap_or("source")
             .to_string();
@@ -435,9 +452,7 @@ async fn find_github_source_tarball_url(
         tracing::info!(url = tarball_url, "Found source tarball URL");
         Ok((tarball_url.to_string(), tag_name))
     })
-    .await;
-
-    result.map_err(|e: String| anyhow!(e))
+    .await
 }
 
 /// Specifies which GitHub release to target.
@@ -462,34 +477,36 @@ async fn find_release_asset(
 ) -> AppResult<(String, String)> {
     let retry_strategy = ExponentialBackoff::from_millis(500).map(jitter).take(3);
 
-    let result: Result<(String, String), String> = Retry::spawn(retry_strategy, || async {
+    Retry::spawn(retry_strategy, || async {
         let repo_url = match specifier {
             ReleaseSpecifier::Latest => format!("{}/repos/{}/releases/latest", base_url, repo),
-            ReleaseSpecifier::Tag(tag) => format!("{}/repos/{}/releases/tags/{}", base_url, repo, tag),
+            ReleaseSpecifier::Tag(tag) => {
+                format!("{}/repos/{}/releases/tags/{}", base_url, repo, tag)
+            }
         };
         tracing::debug!(url = %repo_url, "Fetching release from GitHub API");
 
-        let response: Value = client
+        let response = client
             .get(&repo_url)
             .send()
             .await
-            .map_err(|e| format!("Failed to query GitHub API: {}", e))?
+            .map_err(|e| UserError::GitHubApiError { source: e })?;
+
+        let response_value: Value = response
             .json()
             .await
-            .map_err(|e| format!("Failed to parse JSON response from GitHub API: {}", e))?;
+            .map_err(|e| UserError::GitHubApiError { source: e })?;
 
-        let assets = response["assets"].as_array().ok_or_else(|| {
-            format!(
+        let assets = response_value["assets"].as_array().ok_or_else(|| {
+            anyhow!(
                 "No assets found in release for {}. The release might be empty or the API response changed.",
                 repo
             )
         })?;
 
-        find_best_asset_match(name, assets, os, arch)
+        find_best_asset_match(name, assets, os, arch).map_err(|e| e.into())
     })
-    .await;
-
-    result.map_err(|e| anyhow!(e))
+    .await
 }
 
 /// The core asset-matching logic, extracted into a synchronous function
@@ -499,7 +516,7 @@ fn find_best_asset_match(
     assets: &[Value],
     os: &str,
     arch: &str,
-) -> Result<(String, String), String> {
+) -> AppResult<(String, String)> {
     tracing::debug!(asset_count = assets.len(), "Found release assets");
 
     let os_targets: Vec<&str> = match os {
@@ -551,7 +568,13 @@ fn find_best_asset_match(
         }
         "macos" => vec!["apple-darwin"],
         "windows" => vec!["pc-windows-msvc"],
-        _ => return Err(format!("Unsupported OS: {}", os)),
+        _ => {
+            return Err(UserError::UnsupportedPlatform {
+                name: name.to_string(),
+                os: os.to_string(),
+            }
+            .into())
+        }
     };
 
     let ext = if os == "windows" {
@@ -593,10 +616,12 @@ fn find_best_asset_match(
         }
     }
 
-    Err(format!(
-        "Could not find a matching release asset for {} on {} {}",
-        name, os, arch
-    ))
+    Err(UserError::AssetNotFound {
+        name: name.to_string(),
+        os: os.to_string(),
+        arch: arch.to_string(),
+    }
+    .into())
 }
 
 #[tracing::instrument(skip(client), fields(repo = repo, os = os, arch = arch))]
@@ -651,18 +676,21 @@ fn extract_single_file_from_archive<R: Read + Seek>(
     binary_name: &str,
 ) -> AppResult<()> {
     let target_path = target_dir.join(binary_name);
+    let map_io_err = |source| UserError::ArchiveExtractionFailed { source };
+
     match archive_type {
         ArchiveType::TarGz => {
             let tar = GzDecoder::new(reader);
             let mut archive = Archive::new(tar);
-            for entry in archive.entries()? {
-                let mut entry = entry?;
+            for entry_result in archive.entries().map_err(map_io_err)? {
+                let mut entry = entry_result.map_err(map_io_err)?;
                 if entry
-                    .path()?
+                    .path()
+                    .map_err(map_io_err)?
                     .file_name()
                     .map_or(false, |n| n == binary_name)
                 {
-                    entry.unpack(&target_path)?;
+                    entry.unpack(&target_path).map_err(map_io_err)?;
                     return Ok(());
                 }
             }
@@ -670,28 +698,43 @@ fn extract_single_file_from_archive<R: Read + Seek>(
         ArchiveType::TarXz => {
             let tar = XzDecoder::new(reader);
             let mut archive = Archive::new(tar);
-            for entry in archive.entries()? {
-                let mut entry = entry?;
+            for entry_result in archive.entries().map_err(map_io_err)? {
+                let mut entry = entry_result.map_err(map_io_err)?;
                 if entry
-                    .path()?
+                    .path()
+                    .map_err(map_io_err)?
                     .file_name()
                     .map_or(false, |n| n == binary_name)
                 {
-                    entry.unpack(&target_path)?;
+                    entry.unpack(&target_path).map_err(map_io_err)?;
                     return Ok(());
                 }
             }
         }
         ArchiveType::Zip => {
-            // ZipArchive::new requires the reader to be mutable
-            let mut archive = ZipArchive::new(&mut reader)?;
+            let mut archive = ZipArchive::new(&mut reader).map_err(|e| match e {
+                zip::result::ZipError::Io(io_err) => UserError::ArchiveExtractionFailed {
+                    source: io_err,
+                }
+                .into(),
+                _ => anyhow!("Failed to read zip archive, it may be corrupted: {}", e),
+            })?;
             for i in 0..archive.len() {
-                let mut file = archive.by_index(i)?;
+                let mut file = archive.by_index(i).map_err(|e| match e {
+                    zip::result::ZipError::Io(io_err) => UserError::ArchiveExtractionFailed {
+                        source: io_err,
+                    }
+                    .into(),
+                    _ => anyhow!(
+                        "Failed to read file at index {} in zip archive: {}",
+                        i,
+                        e
+                    ),
+                })?;
                 if let Some(path) = file.enclosed_name() {
                     if path.file_name().map_or(false, |n| n == binary_name) {
-                        let mut outfile = File::create(&target_path)?;
-                        io::copy(&mut file, &mut outfile)?;
-                        // The `download_and_install_binary` function sets permissions afterwards
+                        let mut outfile = File::create(&target_path).map_err(map_io_err)?;
+                        io::copy(&mut file, &mut outfile).map_err(map_io_err)?;
                         return Ok(());
                     }
                 }
@@ -699,10 +742,10 @@ fn extract_single_file_from_archive<R: Read + Seek>(
         }
     }
 
-    Err(anyhow!(
-        "Could not find '{}' in the downloaded archive.",
-        binary_name
-    ))
+    Err(UserError::BinaryNotFoundInArchive {
+        binary_name: binary_name.to_string(),
+    }
+    .into())
 }
 
 /// Helper function to unpack a tar archive while stripping the top-level directory.

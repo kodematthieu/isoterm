@@ -23,8 +23,17 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
-        // Using eprintln to ensure the error message is visible even if the UI is active.
-        eprintln!("\n{} {}", style("Error:").red().bold(), e);
+        if let Some(user_error) = e.downcast_ref::<error::UserError>() {
+            // It's a known, user-facing error. Print it cleanly.
+            eprintln!("\n{} {}", style("Error:").red().bold(), user_error);
+        } else {
+            // It's an unexpected internal error. Print the full context for debugging.
+            eprintln!(
+                "\n{} An unexpected error occurred.",
+                style("Fatal:").red().bold()
+            );
+            eprintln!("{:?}", e);
+        }
         std::process::exit(1);
     }
 }
@@ -51,7 +60,7 @@ async fn run() -> AppResult<()> {
 
     // The entire setup is wrapped in a closure that returns a Result.
     // This allows us to handle any error gracefully by cleaning up the environment directory.
-    let setup_result = (|| async {
+    let setup_result: AppResult<()> = (|| async {
         let client = reqwest::Client::builder()
             .user_agent("isoterm")
             .build()
@@ -179,7 +188,17 @@ async fn run() -> AppResult<()> {
 
     // --- Transactional Cleanup ---
     if let Err(e) = setup_result {
-        eprintln!("\n{} {}", style("Fatal:").red().bold(), style(&e).red());
+        if let Some(user_error) = e.downcast_ref::<error::UserError>() {
+            // It's a known, user-facing error. Print it cleanly.
+            eprintln!("\n{} {}", style("Error:").red().bold(), user_error);
+        } else {
+            // It's an unexpected internal error. Print the full context for debugging.
+            eprintln!(
+                "\n{} An unexpected error occurred.",
+                style("Fatal:").red().bold()
+            );
+            eprintln!("{:?}", e);
+        }
         eprintln!(
             "{}",
             style("Cleaning up partially created environment...").yellow()
