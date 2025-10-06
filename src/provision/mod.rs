@@ -3,7 +3,7 @@ use anyhow::{Context, anyhow};
 use console::style;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use pathdiff;
 use regex::Regex;
 use serde_json::Value;
@@ -12,7 +12,9 @@ use std::fs::{self, File};
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 use tar::Archive;
 use tempfile::NamedTempFile;
 use tokio_retry::Retry;
@@ -98,13 +100,18 @@ pub struct ProvisionContext {
 
 // --- Generic Provisioning Orchestrator ---
 
-#[tracing::instrument(skip(tool, context, pb, spinner_style), fields(tool = tool.name()))]
+#[tracing::instrument(skip(tool, context, mp, overall_pb), fields(tool = tool.name()))]
 pub async fn provision_tool<T: Tool>(
     tool: T,
-    context: &ProvisionContext,
-    pb: &ProgressBar,
-    spinner_style: &ProgressStyle,
+    context: ProvisionContext,
+    mp: MultiProgress,
+    overall_pb: Arc<ProgressBar>,
 ) -> AppResult<()> {
+    let pb = mp.add(ProgressBar::new_spinner());
+    pb.enable_steady_tick(Duration::from_millis(120));
+    let spinner_style =
+        ProgressStyle::with_template("{spinner:.green} {msg}")?.tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏-");
+    pb.set_style(spinner_style.clone());
     pb.set_message(format!("Provisioning {}...", style(tool.name()).bold()));
 
     let bin_dir = context.env_dir.join("bin");
@@ -113,11 +120,13 @@ pub async fn provision_tool<T: Tool>(
     // 1. Check if the binary is already provisioned in our environment.
     if tool_path_in_env.exists() {
         tracing::debug!(path = %tool_path_in_env.display(), "Tool already exists, skipping provisioning.");
-        pb.finish_with_message(format!(
+        overall_pb.println(format!(
             "{} {} is already provisioned",
             style("✓").green(),
             style(tool.name()).bold()
         ));
+        overall_pb.inc(1);
+        pb.finish_and_clear();
         return Ok(());
     }
 
@@ -131,26 +140,30 @@ pub async fn provision_tool<T: Tool>(
         create_symlink(&system_path, &tool_path_in_env)?;
 
         // Run the post-symlink hook (for Helix runtime, etc.)
-        tool.post_symlink_hook(context, pb, &system_path).await?;
+        tool.post_symlink_hook(&context, &pb, &system_path).await?;
 
-        pb.finish_with_message(format!(
+        overall_pb.println(format!(
             "{} Symlinked {} from {}",
             style("✓").green(),
             style(tool.name()).bold(),
             style(system_path.display()).cyan()
         ));
+        overall_pb.inc(1);
+        pb.finish_and_clear();
         return Ok(());
     }
 
     // 3. If not found locally or on PATH, provision from source.
-    tool.provision_from_source(context, pb, spinner_style)
+    tool.provision_from_source(&context, &pb, &spinner_style)
         .await?;
 
-    pb.finish_with_message(format!(
+    overall_pb.println(format!(
         "{} {} provisioned successfully",
         style("✓").green(),
         style(tool.name()).bold()
     ));
+    overall_pb.inc(1);
+    pb.finish_and_clear();
 
     Ok(())
 }
@@ -353,11 +366,7 @@ pub async fn provision_from_github_release<'a>(
         }
     }
 
-    pb.finish_with_message(format!(
-        "{} Installed {} successfully",
-        style("✓").green(),
-        style(name).bold()
-    ));
+    pb.set_message(format!("Installed {} successfully", style(name).bold()));
     Ok(())
 }
 
@@ -435,6 +444,7 @@ async fn find_github_source_tarball_url(
 #[derive(Debug)]
 pub enum ReleaseSpecifier<'a> {
     Latest,
+    #[allow(dead_code)]
     Tag(&'a str),
 }
 

@@ -1,6 +1,5 @@
 use crate::error::AppResult;
 use anyhow::{anyhow, Context};
-use console::style;
 use indicatif::ProgressBar;
 use std::fs;
 use std::path::Path;
@@ -26,10 +25,6 @@ pub async fn generate_configs(env_dir: &Path, pb: &ProgressBar) -> AppResult<()>
     // Generate helix config
     write_helix_config(env_dir)?;
 
-    pb.finish_with_message(format!(
-        "{} Generated configuration files",
-        style("✓").green()
-    ));
     Ok(())
 }
 

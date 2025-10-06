@@ -18,7 +18,7 @@ use futures::future::try_join_all;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::fs;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
@@ -63,8 +63,6 @@ async fn run() -> AppResult<()> {
             ProgressDrawTarget::hidden()
         };
         let mp = MultiProgress::with_draw_target(draw_target);
-        let spinner_style =
-            ProgressStyle::with_template("{spinner:.green} {msg}")?.tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏-");
 
         mp.println(format!(
             "{} Setting up environment in {}",
@@ -87,23 +85,17 @@ async fn run() -> AppResult<()> {
         fs::create_dir_all(&data_dir)?;
         tracing::trace!(path = %data_dir.display(), "Created data directory");
 
-        // --- Create Progress Bars ---
-        let tool_progress_bars =
-            ["fish", "starship", "zoxide", "atuin", "ripgrep", "helix"].map(|name| {
-                let pb = mp.add(ProgressBar::new_spinner());
-                pb.enable_steady_tick(Duration::from_millis(120));
-                pb.set_style(spinner_style.clone());
-                pb.set_message(format!("Queued {}...", style(name).bold()));
-                pb
-            });
-        let [
-            pb_fish,
-            pb_starship,
-            pb_zoxide,
-            pb_atuin,
-            pb_ripgrep,
-            pb_helix,
-        ] = tool_progress_bars;
+        // --- Overall Progress Bar ---
+        let tools_to_provision = [
+            "fish", "starship", "zoxide", "atuin", "ripgrep", "helix",
+        ];
+        let total_steps = (tools_to_provision.len() + 1) as u64; // Tools + config step
+
+        let overall_pb = mp.add(ProgressBar::new(total_steps));
+        let overall_style = ProgressStyle::with_template("[{pos}/{len}] {wide_msg}")?;
+        overall_pb.set_style(overall_style);
+        overall_pb.set_message("Initializing...");
+        let overall_pb = Arc::new(overall_pb);
 
         // --- Spawn all provisioning tasks ---
         let context = ProvisionContext {
@@ -112,36 +104,42 @@ async fn run() -> AppResult<()> {
         };
 
         let tasks = vec![
-            tokio::spawn({
-                let context = context.clone();
-                let style = spinner_style.clone();
-                async move { provision_tool(Fish, &context, &pb_fish, &style).await }
-            }),
-            tokio::spawn({
-                let context = context.clone();
-                let style = spinner_style.clone();
-                async move { provision_tool(Starship, &context, &pb_starship, &style).await }
-            }),
-            tokio::spawn({
-                let context = context.clone();
-                let style = spinner_style.clone();
-                async move { provision_tool(Zoxide, &context, &pb_zoxide, &style).await }
-            }),
-            tokio::spawn({
-                let context = context.clone();
-                let style = spinner_style.clone();
-                async move { provision_tool(Atuin, &context, &pb_atuin, &style).await }
-            }),
-            tokio::spawn({
-                let context = context.clone();
-                let style = spinner_style.clone();
-                async move { provision_tool(Ripgrep, &context, &pb_ripgrep, &style).await }
-            }),
-            tokio::spawn({
-                let context = context.clone();
-                let style = spinner_style.clone();
-                async move { provision_tool(Helix, &context, &pb_helix, &style).await }
-            }),
+            tokio::spawn(provision_tool(
+                Fish,
+                context.clone(),
+                mp.clone(),
+                overall_pb.clone(),
+            )),
+            tokio::spawn(provision_tool(
+                Starship,
+                context.clone(),
+                mp.clone(),
+                overall_pb.clone(),
+            )),
+            tokio::spawn(provision_tool(
+                Zoxide,
+                context.clone(),
+                mp.clone(),
+                overall_pb.clone(),
+            )),
+            tokio::spawn(provision_tool(
+                Atuin,
+                context.clone(),
+                mp.clone(),
+                overall_pb.clone(),
+            )),
+            tokio::spawn(provision_tool(
+                Ripgrep,
+                context.clone(),
+                mp.clone(),
+                overall_pb.clone(),
+            )),
+            tokio::spawn(provision_tool(
+                Helix,
+                context.clone(),
+                mp.clone(),
+                overall_pb.clone(),
+            )),
         ];
 
         // --- Await tasks concurrently ---
@@ -153,11 +151,16 @@ async fn run() -> AppResult<()> {
         }
 
         // --- Configuration Step ---
-        let pb_config = mp.add(ProgressBar::new_spinner());
-        pb_config.enable_steady_tick(Duration::from_millis(120));
-        pb_config.set_style(spinner_style);
-        config::generate_configs(&env_dir, &pb_config).await?;
+        overall_pb.set_message("Generating configuration files...");
+        config::generate_configs(&env_dir, &overall_pb).await?;
+        overall_pb.println(format!(
+            "{} Generated configuration files",
+            style("✓").green()
+        ));
+        overall_pb.inc(1);
 
+        // --- Finalization ---
+        overall_pb.finish_and_clear();
         mp.println(format!(
             "\n{} Environment setup complete!",
             style("🚀").green()
