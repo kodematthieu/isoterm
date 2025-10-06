@@ -1,6 +1,6 @@
 use super::{
-    create_symlink, download_to_temp_file, extract_archive, find_github_release_asset_url,
-    provision_source_share, ProvisionContext, Tool,
+    ProvisionContext, Tool, create_symlink, download_to_temp_file, extract_archive,
+    find_github_release_asset_url, provision_source_share,
 };
 use crate::error::AppResult;
 use console::style;

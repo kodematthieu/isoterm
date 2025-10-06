@@ -7,8 +7,8 @@ use crate::{
     cli::Cli,
     error::AppResult,
     provision::{
-        atuin::Atuin, fish::Fish, helix::Helix, provision_tool, ripgrep::Ripgrep,
-        starship::Starship, zoxide::Zoxide, ProvisionContext,
+        ProvisionContext, atuin::Atuin, fish::Fish, helix::Helix, provision_tool, ripgrep::Ripgrep,
+        starship::Starship, zoxide::Zoxide,
     },
 };
 use anyhow::Context;
@@ -63,8 +63,8 @@ async fn run() -> AppResult<()> {
             ProgressDrawTarget::hidden()
         };
         let mp = MultiProgress::with_draw_target(draw_target);
-        let spinner_style = ProgressStyle::with_template("{spinner:.green} {msg}")?
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏-");
+        let spinner_style =
+            ProgressStyle::with_template("{spinner:.green} {msg}")?.tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏-");
 
         mp.println(format!(
             "{} Setting up environment in {}",
@@ -96,8 +96,14 @@ async fn run() -> AppResult<()> {
                 pb.set_message(format!("Queued {}...", style(name).bold()));
                 pb
             });
-        let [pb_fish, pb_starship, pb_zoxide, pb_atuin, pb_ripgrep, pb_helix] =
-            tool_progress_bars;
+        let [
+            pb_fish,
+            pb_starship,
+            pb_zoxide,
+            pb_atuin,
+            pb_ripgrep,
+            pb_helix,
+        ] = tool_progress_bars;
 
         // --- Spawn all provisioning tasks ---
         let context = ProvisionContext {

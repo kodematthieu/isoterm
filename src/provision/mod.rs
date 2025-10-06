@@ -1,5 +1,5 @@
 use crate::error::AppResult;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use console::style;
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
@@ -81,7 +81,6 @@ pub trait Tool: Send + Sync {
     }
 }
 
-
 /// A context struct to pass shared, read-only data to provisioning tasks.
 #[derive(Clone)]
 pub struct ProvisionContext {
@@ -136,7 +135,8 @@ pub async fn provision_tool<T: Tool>(
     }
 
     // 3. If not found locally or on PATH, provision from source.
-    tool.provision_from_source(context, pb, spinner_style).await?;
+    tool.provision_from_source(context, pb, spinner_style)
+        .await?;
 
     pb.finish_with_message(format!(
         "{} {} provisioned successfully",
@@ -147,9 +147,7 @@ pub async fn provision_tool<T: Tool>(
     Ok(())
 }
 
-
 // --- Helper Functions ---
-
 
 /// Attempts to get the system's glibc version.
 /// Returns a tuple of (major, minor) version numbers on success.
@@ -317,10 +315,7 @@ pub async fn download_and_install_archive(
     let file = temp_file.reopen()?;
 
     pb.set_style(spinner_style.clone());
-    pb.set_message(format!(
-        "Extracting archive for {}...",
-        style(name).bold()
-    ));
+    pb.set_message(format!("Extracting archive for {}...", style(name).bold()));
 
     let tool_dir = env_dir.join(name);
     fs::create_dir_all(&tool_dir)?;
@@ -375,10 +370,7 @@ pub async fn provision_source_share(
     let mut file = temp_file.reopen()?;
 
     // 3. Selectively extract the 'share' directory
-    pb.set_message(format!(
-        "Extracting 'share' for {}...",
-        style(name).bold()
-    ));
+    pb.set_message(format!("Extracting 'share' for {}...", style(name).bold()));
     extract_share_from_tar_gz(&mut file, dest_dir)?;
 
     Ok(())
@@ -973,7 +965,7 @@ pub fn extract_runtime_from_zip_archive<R: io::Read + io::Seek>(
                     let mut outfile = fs::File::create(&outpath)?;
                     io::copy(&mut file, &mut outfile)?;
                 }
-                 #[cfg(unix)]
+                #[cfg(unix)]
                 if let Some(mode) = file.unix_mode() {
                     fs::set_permissions(&outpath, fs::Permissions::from_mode(mode))?;
                 }

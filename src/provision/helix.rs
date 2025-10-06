@@ -1,5 +1,5 @@
 use super::{
-    download_and_install_archive, provision_helix_runtime_for_symlink, ProvisionContext, Tool,
+    ProvisionContext, Tool, download_and_install_archive, provision_helix_runtime_for_symlink,
 };
 use crate::error::AppResult;
 use anyhow::Context;
