@@ -38,3 +38,10 @@ wiremock = "0.6.0"
 [[bin]]
 name = "isoterm"
 test = false
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
