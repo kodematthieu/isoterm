@@ -54,14 +54,22 @@ pub trait Tool: Send + Sync {
         pb: &ProgressBar,
         spinner_style: &ProgressStyle,
     ) -> AppResult<()> {
-        download_and_install_binary(
-            &context.env_dir,
+        let strategy = if let Some(path_in_archive) = self.path_in_archive() {
+            ExtractionStrategy::FullArchive { path_in_archive }
+        } else {
+            ExtractionStrategy::SingleBinary {
+                binary_name: self.binary_name(),
+            }
+        };
+
+        provision_from_github_release(
+            context,
             self.name(),
             self.repo(),
             self.binary_name(),
+            strategy,
             pb,
             spinner_style,
-            &context.client,
         )
         .await
     }
@@ -197,6 +205,45 @@ fn get_glibc_version() -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
+/// Manages the state for a file download, including progress bar and temp file.
+struct DownloadManager<'a> {
+    pb: &'a ProgressBar,
+    temp_file: NamedTempFile,
+}
+
+impl<'a> DownloadManager<'a> {
+    /// Creates a new DownloadManager.
+    fn new(pb: &'a ProgressBar) -> AppResult<Self> {
+        let temp_file = NamedTempFile::new()?;
+        Ok(Self { pb, temp_file })
+    }
+
+    /// Configures the progress bar for a download.
+    fn setup_progress_bar(&self, asset_name: &str, total_size: u64) -> AppResult<()> {
+        let download_style = ProgressStyle::with_template(
+            "{spinner:.green} {msg}\n{wide_bar:.cyan/blue} {bytes}/{total_bytes} ({eta})",
+        )?
+        .progress_chars("#>-");
+
+        self.pb.set_style(download_style);
+        self.pb.set_length(total_size);
+        self.pb.set_message(format!("Downloading {}", style(asset_name).cyan()));
+        Ok(())
+    }
+
+    /// Writes a chunk of bytes to the temporary file and updates the progress bar.
+    fn write_chunk(&mut self, chunk: &[u8]) -> AppResult<()> {
+        self.temp_file.write_all(chunk)?;
+        self.pb.inc(chunk.len() as u64);
+        Ok(())
+    }
+
+    /// Consumes the manager and returns the underlying temporary file.
+    fn finish(self) -> NamedTempFile {
+        self.temp_file
+    }
+}
+
 /// Downloads a file to a temporary file on disk, showing progress.
 async fn download_to_temp_file(
     url: &str,
@@ -207,7 +254,6 @@ async fn download_to_temp_file(
     let retry_strategy = ExponentialBackoff::from_millis(500).map(jitter).take(3);
 
     let result = Retry::spawn(retry_strategy, || async {
-        // Reset progress bar on each attempt
         pb.set_position(0);
 
         let response = client
@@ -219,126 +265,93 @@ async fn download_to_temp_file(
             .map_err(|e| e.to_string())?;
         let total_size = response.content_length().unwrap_or(0);
 
-        let download_style = ProgressStyle::with_template(
-            "{spinner:.green} {msg}\n{wide_bar:.cyan/blue} {bytes}/{total_bytes} ({eta})",
-        )
-        .map_err(|e| e.to_string())?
-        .progress_chars("#>-");
+        let mut manager = DownloadManager::new(pb).map_err(|e| e.to_string())?;
+        manager
+            .setup_progress_bar(asset_name, total_size)
+            .map_err(|e| e.to_string())?;
 
-        pb.set_style(download_style);
-        pb.set_length(total_size);
-        pb.set_message(format!("Downloading {}", style(asset_name).cyan()));
-
-        let mut temp_file = NamedTempFile::new().map_err(|e| e.to_string())?;
         let mut stream = response.bytes_stream();
 
         while let Some(item) = stream.next().await {
             let chunk = item.map_err(|e| format!("Failed to read download chunk: {}", e))?;
-            temp_file.write_all(&chunk).map_err(|e| e.to_string())?;
-            pb.inc(chunk.len() as u64);
+            manager.write_chunk(&chunk).map_err(|e| e.to_string())?;
         }
 
-        Ok(temp_file)
+        Ok(manager.finish())
     })
     .await;
 
     result.map_err(|e: String| anyhow!(e))
 }
 
-#[tracing::instrument(skip(env_dir, pb, spinner_style, client))]
-pub async fn download_and_install_binary(
-    env_dir: &Path,
-    name: &str,
-    repo: &str,
-    binary_name: &str,
-    pb: &ProgressBar,
-    spinner_style: &ProgressStyle,
-    client: &reqwest::Client,
-) -> AppResult<()> {
-    let (download_url, asset_name) = find_github_release_asset_url(
-        name,
-        repo,
-        "https://api.github.com",
-        env::consts::OS,
-        env::consts::ARCH,
-        client,
-    )
-    .await?;
-    let temp_file = download_to_temp_file(&download_url, &asset_name, pb, client).await?;
-
-    pb.set_style(spinner_style.clone());
-    pb.set_message(format!("Extracting {}...", style(binary_name).bold()));
-
-    let bin_dir = env_dir.join("bin");
-    let tool_path = bin_dir.join(binary_name);
-    let mut file = temp_file.reopen()?;
-
-    if asset_name.ends_with(".zip") {
-        extract_zip(&mut file, &bin_dir, binary_name)?;
-    } else if asset_name.ends_with(".tar.gz") {
-        extract_tar_gz(&mut file, &bin_dir, binary_name)?;
-    } else if asset_name.ends_with(".tar.xz") {
-        extract_tar_xz(&mut file, &bin_dir, binary_name)?;
-    } else {
-        return Err(anyhow!("Unsupported archive format for {}", asset_name));
-    }
-
-    #[cfg(unix)]
-    {
-        fs::set_permissions(&tool_path, fs::Permissions::from_mode(0o755))?;
-    }
-
-    Ok(())
+/// Defines how a downloaded archive should be processed.
+#[derive(Debug)]
+pub enum ExtractionStrategy<'a> {
+    /// Extract a single binary file from the archive.
+    SingleBinary { binary_name: &'a str },
+    /// Extract the entire archive to a specified directory.
+    FullArchive {
+        /// The path to the binary within the extracted archive, relative to the archive root.
+        path_in_archive: &'a str,
+    },
 }
 
-#[tracing::instrument(skip(env_dir, pb, spinner_style, client))]
-pub async fn download_and_install_archive(
-    env_dir: &Path,
-    name: &str,
-    repo: &str,
-    binary_name: &str,
-    path_in_archive: &str,
+/// A unified function to download a tool from a GitHub release and install it
+/// based on the specified extraction strategy.
+#[tracing::instrument(skip(context, pb, spinner_style))]
+pub async fn provision_from_github_release<'a>(
+    context: &ProvisionContext,
+    name: &'a str,
+    repo: &'a str,
+    binary_name: &'a str,
+    strategy: ExtractionStrategy<'a>,
     pb: &ProgressBar,
     spinner_style: &ProgressStyle,
-    client: &reqwest::Client,
 ) -> AppResult<()> {
+    // 1. Find the asset URL
     let (download_url, asset_name) = find_github_release_asset_url(
         name,
         repo,
         "https://api.github.com",
         env::consts::OS,
         env::consts::ARCH,
-        client,
+        &context.client,
     )
     .await?;
-    let temp_file = download_to_temp_file(&download_url, &asset_name, pb, client).await?;
+
+    // 2. Download to a temp file
+    let temp_file =
+        download_to_temp_file(&download_url, &asset_name, pb, &context.client).await?;
     let file = temp_file.reopen()?;
+    let archive_type = ArchiveType::from_asset_name(&asset_name)?;
 
     pb.set_style(spinner_style.clone());
-    pb.set_message(format!("Extracting archive for {}...", style(name).bold()));
 
-    let tool_dir = env_dir.join(name);
-    fs::create_dir_all(&tool_dir)?;
+    // 3. Extract based on the strategy
+    match strategy {
+        ExtractionStrategy::SingleBinary { binary_name } => {
+            pb.set_message(format!("Extracting {}...", style(binary_name).bold()));
+            let bin_dir = context.env_dir.join("bin");
+            extract_single_file_from_archive(file, archive_type, &bin_dir, binary_name)?;
 
-    if asset_name.ends_with(".tar.gz") {
-        let tar = GzDecoder::new(file);
-        let mut archive = Archive::new(tar);
-        extract_archive(&mut archive, &tool_dir)?;
-    } else if asset_name.ends_with(".tar.xz") {
-        let tar = XzDecoder::new(file);
-        let mut archive = Archive::new(tar);
-        extract_archive(&mut archive, &tool_dir)?;
-    } else if asset_name.ends_with(".zip") {
-        let mut zip = ZipArchive::new(file)?;
-        extract_zip_archive(&mut zip, &tool_dir)?;
-    } else {
-        return Err(anyhow!("Unsupported archive format: {}", asset_name));
+            #[cfg(unix)]
+            {
+                let tool_path = bin_dir.join(binary_name);
+                fs::set_permissions(&tool_path, fs::Permissions::from_mode(0o755))?;
+            }
+        }
+        ExtractionStrategy::FullArchive { path_in_archive } => {
+            pb.set_message(format!("Extracting archive for {}...", style(name).bold()));
+            let tool_dir = context.env_dir.join(name);
+            fs::create_dir_all(&tool_dir)?;
+
+            extract_full_archive(file, archive_type, &tool_dir)?;
+
+            let binary_path_in_archive = tool_dir.join(path_in_archive);
+            let binary_path_in_env = context.env_dir.join("bin").join(binary_name);
+            create_symlink(&binary_path_in_archive, &binary_path_in_env)?;
+        }
     }
-
-    let binary_path_in_archive = tool_dir.join(path_in_archive);
-    let binary_path_in_env = env_dir.join("bin").join(binary_name);
-
-    create_symlink(&binary_path_in_archive, &binary_path_in_env)?;
 
     pb.finish_with_message(format!(
         "{} Installed {} successfully",
@@ -367,11 +380,12 @@ pub async fn provision_source_share(
 
     // 2. Download to a temp file
     let temp_file = download_to_temp_file(&source_url, &asset_name, pb, client).await?;
-    let mut file = temp_file.reopen()?;
+    let file = temp_file.reopen()?;
 
     // 3. Selectively extract the 'share' directory
     pb.set_message(format!("Extracting 'share' for {}...", style(name).bold()));
-    extract_share_from_tar_gz(&mut file, dest_dir)?;
+    // Source tarballs from GitHub are always .tar.gz
+    extract_sub_directory(file, ArchiveType::TarGz, dest_dir, "share")?;
 
     Ok(())
 }
@@ -417,10 +431,20 @@ async fn find_github_source_tarball_url(
     result.map_err(|e: String| anyhow!(e))
 }
 
+/// Specifies which GitHub release to target.
+#[derive(Debug)]
+pub enum ReleaseSpecifier<'a> {
+    Latest,
+    Tag(&'a str),
+}
+
+/// A generic, asynchronous function to find a release asset URL from the GitHub API.
+/// It can target either the latest release or a release by a specific tag.
 #[tracing::instrument(skip(client), fields(repo = repo, os = os, arch = arch))]
-async fn find_github_release_asset_url(
+async fn find_release_asset(
     name: &str,
     repo: &str,
+    specifier: ReleaseSpecifier<'_>,
     base_url: &str,
     os: &str,
     arch: &str,
@@ -428,9 +452,12 @@ async fn find_github_release_asset_url(
 ) -> AppResult<(String, String)> {
     let retry_strategy = ExponentialBackoff::from_millis(500).map(jitter).take(3);
 
-    let result = Retry::spawn(retry_strategy, || async {
-        let repo_url = format!("{}/repos/{}/releases/latest", base_url, repo);
-        tracing::debug!(url = %repo_url, "Fetching latest release from GitHub API");
+    let result: Result<(String, String), String> = Retry::spawn(retry_strategy, || async {
+        let repo_url = match specifier {
+            ReleaseSpecifier::Latest => format!("{}/repos/{}/releases/latest", base_url, repo),
+            ReleaseSpecifier::Tag(tag) => format!("{}/repos/{}/releases/tags/{}", base_url, repo, tag),
+        };
+        tracing::debug!(url = %repo_url, "Fetching release from GitHub API");
 
         let response: Value = client
             .get(&repo_url)
@@ -448,142 +475,222 @@ async fn find_github_release_asset_url(
             )
         })?;
 
-        tracing::debug!(asset_count = assets.len(), "Found release assets");
-
-        let os_targets: Vec<&str> = match os {
-            "linux" => {
-                let mut gnu_preferred = true;
-
-                #[cfg(target_os = "linux")]
-                {
-                    // Atuin's GNU binary is built against glibc 2.35.
-                    // If the system's glibc is older, we prefer musl.
-                    const MIN_GLIBC_VERSION: (u32, u32) = (2, 35);
-
-                    if let Some((major, minor)) = get_glibc_version() {
-                        if (major, minor) < MIN_GLIBC_VERSION {
-                            tracing::info!(
-                                "System glibc version {}.{} is older than required {}.{}. Prioritizing musl build.",
-                                major, minor, MIN_GLIBC_VERSION.0, MIN_GLIBC_VERSION.1
-                            );
-                            gnu_preferred = false;
-                        }
-                    } else {
-                        tracing::warn!("Could not determine glibc version. Defaulting to musl for safety.");
-                        gnu_preferred = false; // Default to safer musl if check fails
-                    }
-                }
-
-                let default_targets = if gnu_preferred {
-                    vec!["unknown-linux-gnu", "unknown-linux-musl"]
-                } else {
-                    vec!["unknown-linux-musl", "unknown-linux-gnu"]
-                };
-
-                match name {
-                    "fish" | "helix" => vec!["linux"],
-                    _ => default_targets,
-                }
-            }
-            "android" => {
-                // Android does not use glibc, so musl is generally the better choice if available.
-                 match name {
-                    "fish" | "helix" => vec!["linux"],
-                    _ => vec!["unknown-linux-musl", "unknown-linux-gnu"],
-                }
-            }
-            "macos" => vec!["apple-darwin"],
-            "windows" => vec!["pc-windows-msvc"],
-            _ => return Err(format!("Unsupported OS: {}", os)),
-        };
-
-        let ext = if os == "windows" {
-            "zip"
-        } else {
-            match name {
-                "helix" if os == "linux" => "tar.xz",
-                "helix" if os == "macos" => "zip",
-                "fish" => "tar.xz",
-                _ => "tar.gz",
-            }
-        };
-
-        for os_target in &os_targets {
-            let fragments_to_use = vec![name, arch, *os_target, ext];
-            tracing::debug!(fragments = ?fragments_to_use, "Searching for asset");
-
-            for asset in assets {
-                let asset_name = asset["name"].as_str().unwrap_or("");
-                let lower_name = asset_name.to_lowercase();
-
-                if fragments_to_use
-                    .iter()
-                    .all(|frag| lower_name.contains(&frag.to_lowercase()))
-                {
-                    if let Some(url) = asset["browser_download_url"].as_str() {
-                        tracing::info!(asset = asset_name, "Found matching release asset");
-                        return Ok((url.to_string(), asset_name.to_string()));
-                    }
-                }
-            }
-        }
-
-        Err(format!(
-            "Could not find a matching release asset for {} on {} {}",
-            name, os, arch
-        ))
+        find_best_asset_match(name, assets, os, arch)
     })
     .await;
 
-    result.map_err(|e: String| anyhow!(e))
+    result.map_err(|e| anyhow!(e))
 }
 
-#[tracing::instrument(skip(reader))]
-fn extract_tar_gz<R: Read>(reader: R, target_dir: &Path, binary_name: &str) -> AppResult<()> {
-    let tar = GzDecoder::new(reader);
-    let mut archive = Archive::new(tar);
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?;
-        tracing::trace!(entry_path = ?path, "Unpacking archive entry");
-        if path.file_name().map_or(false, |n| n == binary_name) {
-            entry.unpack(target_dir.join(binary_name))?;
-            return Ok(());
+
+/// The core asset-matching logic, extracted into a synchronous function
+/// so it can be shared by both async and blocking API callers.
+fn find_best_asset_match(
+    name: &str,
+    assets: &[Value],
+    os: &str,
+    arch: &str,
+) -> Result<(String, String), String> {
+    tracing::debug!(asset_count = assets.len(), "Found release assets");
+
+    let os_targets: Vec<&str> = match os {
+        "linux" => {
+            let mut gnu_preferred = true;
+
+            #[cfg(target_os = "linux")]
+            {
+                // Atuin's GNU binary is built against glibc 2.35.
+                // If the system's glibc is older, we prefer musl.
+                const MIN_GLIBC_VERSION: (u32, u32) = (2, 35);
+
+                if let Some((major, minor)) = get_glibc_version() {
+                    if (major, minor) < MIN_GLIBC_VERSION {
+                        tracing::info!(
+                            "System glibc version {}.{} is older than required {}.{}. Prioritizing musl build.",
+                            major, minor, MIN_GLIBC_VERSION.0, MIN_GLIBC_VERSION.1
+                        );
+                        gnu_preferred = false;
+                    }
+                } else {
+                    tracing::warn!("Could not determine glibc version. Defaulting to musl for safety.");
+                    gnu_preferred = false; // Default to safer musl if check fails
+                }
+            }
+
+            let default_targets = if gnu_preferred {
+                vec!["unknown-linux-gnu", "unknown-linux-musl"]
+            } else {
+                vec!["unknown-linux-musl", "unknown-linux-gnu"]
+            };
+
+            match name {
+                "fish" | "helix" => vec!["linux"],
+                _ => default_targets,
+            }
+        }
+        "android" => {
+            // Android does not use glibc, so musl is generally the better choice if available.
+             match name {
+                "fish" | "helix" => vec!["linux"],
+                _ => vec!["unknown-linux-musl", "unknown-linux-gnu"],
+            }
+        }
+        "macos" => vec!["apple-darwin"],
+        "windows" => vec!["pc-windows-msvc"],
+        _ => return Err(format!("Unsupported OS: {}", os)),
+    };
+
+    let ext = if os == "windows" {
+        "zip"
+    } else {
+        match name {
+            "helix" if os == "linux" => "tar.xz",
+            "helix" if os == "macos" => "zip",
+            "fish" => "tar.xz",
+            _ => "tar.gz",
+        }
+    };
+
+    for os_target in &os_targets {
+        // For Helix, the tag is part of the asset name, but `name` is "helix-editor/helix".
+        // We only want to match against "helix".
+        let name_to_match = if name.contains('/') {
+            name.split('/').last().unwrap_or(name)
+        } else {
+            name
+        };
+
+        let fragments_to_use = vec![name_to_match, arch, *os_target, ext];
+        tracing::debug!(fragments = ?fragments_to_use, "Searching for asset");
+
+        for asset in assets {
+            let asset_name = asset["name"].as_str().unwrap_or("");
+            let lower_name = asset_name.to_lowercase();
+
+            if fragments_to_use
+                .iter()
+                .all(|frag| lower_name.contains(&frag.to_lowercase()))
+            {
+                if let Some(url) = asset["browser_download_url"].as_str() {
+                    tracing::info!(asset = asset_name, "Found matching release asset");
+                    return Ok((url.to_string(), asset_name.to_string()));
+                }
+            }
         }
     }
+
+    Err(format!(
+        "Could not find a matching release asset for {} on {} {}",
+        name, os, arch
+    ))
+}
+
+
+#[tracing::instrument(skip(client), fields(repo = repo, os = os, arch = arch))]
+async fn find_github_release_asset_url(
+    name: &str,
+    repo: &str,
+    base_url: &str,
+    os: &str,
+    arch: &str,
+    client: &reqwest::Client,
+) -> AppResult<(String, String)> {
+    find_release_asset(
+        name,
+        repo,
+        ReleaseSpecifier::Latest,
+        base_url,
+        os,
+        arch,
+        client,
+    )
+    .await
+}
+
+#[derive(Debug)]
+pub enum ArchiveType {
+    TarGz,
+    TarXz,
+    Zip,
+}
+
+impl ArchiveType {
+    /// Determines the archive type from the asset's file name.
+    pub fn from_asset_name(name: &str) -> AppResult<Self> {
+        if name.ends_with(".tar.gz") {
+            Ok(ArchiveType::TarGz)
+        } else if name.ends_with(".tar.xz") {
+            Ok(ArchiveType::TarXz)
+        } else if name.ends_with(".zip") {
+            Ok(ArchiveType::Zip)
+        } else {
+            Err(anyhow!("Unsupported archive format for {}", name))
+        }
+    }
+}
+
+/// A generic function to extract a single file from a `.tar.gz`, `.tar.xz`, or `.zip` archive.
+#[tracing::instrument(skip(reader))]
+fn extract_single_file_from_archive<R: Read + Seek>(
+    mut reader: R,
+    archive_type: ArchiveType,
+    target_dir: &Path,
+    binary_name: &str,
+) -> AppResult<()> {
+    let target_path = target_dir.join(binary_name);
+    match archive_type {
+        ArchiveType::TarGz => {
+            let tar = GzDecoder::new(reader);
+            let mut archive = Archive::new(tar);
+            for entry in archive.entries()? {
+                let mut entry = entry?;
+                if entry.path()?.file_name().map_or(false, |n| n == binary_name) {
+                    entry.unpack(&target_path)?;
+                    return Ok(());
+                }
+            }
+        }
+        ArchiveType::TarXz => {
+            let tar = XzDecoder::new(reader);
+            let mut archive = Archive::new(tar);
+            for entry in archive.entries()? {
+                let mut entry = entry?;
+                if entry.path()?.file_name().map_or(false, |n| n == binary_name) {
+                    entry.unpack(&target_path)?;
+                    return Ok(());
+                }
+            }
+        }
+        ArchiveType::Zip => {
+            // ZipArchive::new requires the reader to be mutable
+            let mut archive = ZipArchive::new(&mut reader)?;
+            for i in 0..archive.len() {
+                let mut file = archive.by_index(i)?;
+                if let Some(path) = file.enclosed_name() {
+                    if path.file_name().map_or(false, |n| n == binary_name) {
+                        let mut outfile = File::create(&target_path)?;
+                        io::copy(&mut file, &mut outfile)?;
+                        // The `download_and_install_binary` function sets permissions afterwards
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
     Err(anyhow!(
-        "Could not find '{}' in the downloaded .tar.gz archive.",
+        "Could not find '{}' in the downloaded archive.",
         binary_name
     ))
 }
 
-#[tracing::instrument(skip(reader))]
-fn extract_tar_xz<R: Read>(reader: R, target_dir: &Path, binary_name: &str) -> AppResult<()> {
-    let tar = XzDecoder::new(reader);
-    let mut archive = Archive::new(tar);
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?;
-        tracing::trace!(entry_path = ?path, "Unpacking archive entry");
-        if path.file_name().map_or(false, |n| n == binary_name) {
-            entry.unpack(target_dir.join(binary_name))?;
-            return Ok(());
-        }
-    }
-    Err(anyhow!(
-        "Could not find '{}' in the downloaded .tar.xz archive.",
-        binary_name
-    ))
-}
-
-pub fn extract_archive<R: io::Read>(archive: &mut Archive<R>, target_dir: &Path) -> AppResult<()> {
+/// Helper function to unpack a tar archive while stripping the top-level directory.
+fn unpack_tar_archive<R: io::Read>(archive: &mut Archive<R>, target_dir: &Path) -> AppResult<()> {
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
         let path = entry.path()?.to_path_buf();
         tracing::trace!(entry_path = ?path, "Unpacking archive entry");
 
-        // If the path has more than one component, it's nested in a top-level directory.
-        // In that case, we strip the top-level directory. Otherwise, we use the path as is.
         let stripped_path = if path.components().count() > 1 {
             path.strip_prefix(path.components().next().unwrap())
                 .unwrap_or(&path)
@@ -606,62 +713,56 @@ pub fn extract_archive<R: io::Read>(archive: &mut Archive<R>, target_dir: &Path)
     Ok(())
 }
 
-pub fn extract_zip_archive<R: io::Read + io::Seek>(
-    archive: &mut ZipArchive<R>,
+/// A generic function to extract a full archive, stripping the top-level directory.
+#[tracing::instrument(skip(reader))]
+pub fn extract_full_archive<R: Read + Seek>(
+    mut reader: R,
+    archive_type: ArchiveType,
     target_dir: &Path,
 ) -> AppResult<()> {
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        if let Some(enclosed_name) = file.enclosed_name() {
-            tracing::trace!(entry_path = ?enclosed_name, "Unpacking archive entry");
-            let stripped_path = enclosed_name
-                .strip_prefix(enclosed_name.components().next().unwrap())
-                .unwrap_or(&enclosed_name);
-            let outpath = target_dir.join(stripped_path);
-            if file.name().ends_with('/') {
-                fs::create_dir_all(&outpath)?;
-            } else {
-                if let Some(p) = outpath.parent() {
-                    if !p.exists() {
-                        fs::create_dir_all(p)?;
+    match archive_type {
+        ArchiveType::TarGz => {
+            let tar = GzDecoder::new(reader);
+            let mut archive = Archive::new(tar);
+            unpack_tar_archive(&mut archive, target_dir)?;
+        }
+        ArchiveType::TarXz => {
+            let tar = XzDecoder::new(reader);
+            let mut archive = Archive::new(tar);
+            unpack_tar_archive(&mut archive, target_dir)?;
+        }
+        ArchiveType::Zip => {
+            let mut archive = ZipArchive::new(&mut reader)?;
+            for i in 0..archive.len() {
+                let mut file = archive.by_index(i)?;
+                if let Some(enclosed_name) = file.enclosed_name() {
+                    tracing::trace!(entry_path = ?enclosed_name, "Unpacking archive entry");
+                    let stripped_path = enclosed_name
+                        .strip_prefix(enclosed_name.components().next().unwrap())
+                        .unwrap_or(&enclosed_name);
+                    let outpath = target_dir.join(stripped_path);
+                    if file.name().ends_with('/') {
+                        fs::create_dir_all(&outpath)?;
+                    } else {
+                        if let Some(p) = outpath.parent() {
+                            if !p.exists() {
+                                fs::create_dir_all(p)?;
+                            }
+                        }
+                        let mut outfile = fs::File::create(&outpath)?;
+                        io::copy(&mut file, &mut outfile)?;
+                    }
+                    #[cfg(unix)]
+                    if let Some(mode) = file.unix_mode() {
+                        fs::set_permissions(&outpath, fs::Permissions::from_mode(mode))?;
                     }
                 }
-                let mut outfile = fs::File::create(&outpath)?;
-                io::copy(&mut file, &mut outfile)?;
-            }
-            #[cfg(unix)]
-            if let Some(mode) = file.unix_mode() {
-                fs::set_permissions(&outpath, fs::Permissions::from_mode(mode))?;
             }
         }
     }
     Ok(())
 }
 
-#[tracing::instrument(skip(reader))]
-fn extract_zip<R: Read + Seek>(reader: R, target_dir: &Path, binary_name: &str) -> AppResult<()> {
-    let mut archive = ZipArchive::new(reader)?;
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        if let Some(path) = file.enclosed_name() {
-            tracing::trace!(entry_path = ?path, "Unpacking archive entry");
-            if path.file_name().map_or(false, |n| n == binary_name) {
-                let target_path = target_dir.join(binary_name);
-                let mut outfile = File::create(&target_path)?;
-                io::copy(&mut file, &mut outfile)?;
-                #[cfg(unix)]
-                {
-                    fs::set_permissions(&target_path, fs::Permissions::from_mode(0o755))?;
-                }
-                return Ok(());
-            }
-        }
-    }
-    Err(anyhow!(
-        "Could not find '{}' in the downloaded .zip archive.",
-        binary_name
-    ))
-}
 
 #[cfg(unix)]
 #[tracing::instrument(fields(original = %original.display(), link = %link.display()))]
@@ -686,43 +787,6 @@ pub fn create_symlink(original: &Path, link: &Path) -> AppResult<()> {
     } else {
         symlink_file(relative_path, link).context("Failed to create file symlink")
     }
-}
-
-/// Extracts only the 'share' directory from a gzipped tarball into a target directory.
-/// It strips the top-level directory from the archive, so the contents of 'share'
-/// are placed directly in the target directory.
-#[tracing::instrument(skip(reader))]
-pub fn extract_share_from_tar_gz<R: Read>(reader: R, target_dir: &Path) -> AppResult<()> {
-    let tar = GzDecoder::new(reader);
-    let mut archive = Archive::new(tar);
-    fs::create_dir_all(target_dir)?;
-
-    for entry_result in archive.entries()? {
-        let mut entry = entry_result?;
-        let path = entry.path()?;
-
-        // Find paths that are inside a 'share' directory.
-        // e.g., "fish-shell-3.7.1/share/completions/git.fish"
-        if let Some(share_index) = path.to_str().and_then(|s| s.find("/share/")) {
-            // Get the path relative to the inside of the 'share' dir.
-            // For the example above, this becomes "completions/git.fish".
-            // We add 1 to the index to skip the leading slash.
-            let relative_path_str = &path.to_str().unwrap()[share_index + 1..];
-            let relative_path = Path::new(relative_path_str);
-
-            // Prepend the target directory to get the final output path.
-            let outpath = target_dir.join(relative_path);
-
-            if let Some(p) = outpath.parent() {
-                if !p.exists() {
-                    fs::create_dir_all(p)?;
-                }
-            }
-            entry.unpack(&outpath)?;
-        }
-    }
-
-    Ok(())
 }
 
 /// For a symlinked Helix, provisions a local runtime if the user-wide one is missing.
@@ -755,19 +819,8 @@ pub fn provision_helix_runtime_for_symlink(
     tracing::debug!(path = %helix_dir.display(), "Ensured helix directory exists");
 
     let file = temp_file.reopen()?;
-    if asset_name.ends_with(".tar.xz") {
-        let tar = XzDecoder::new(file);
-        let mut archive = Archive::new(tar);
-        extract_runtime_from_archive(&mut archive, &helix_dir)?;
-    } else if asset_name.ends_with(".zip") {
-        let mut zip = ZipArchive::new(file)?;
-        extract_runtime_from_zip_archive(&mut zip, &helix_dir)?;
-    } else {
-        return Err(anyhow!(
-            "Unsupported archive format for Helix runtime: {}",
-            asset_name
-        ));
-    }
+    let archive_type = ArchiveType::from_asset_name(&asset_name)?;
+    extract_sub_directory(file, archive_type, &helix_dir, "runtime")?;
 
     tracing::info!("Successfully provisioned local Helix runtime.");
     Ok(())
@@ -820,28 +873,19 @@ fn download_to_temp_file_blocking(
 
     let total_size = response.content_length().unwrap_or(0);
 
-    let download_style = ProgressStyle::with_template(
-        "{spinner:.green} {msg}\n{wide_bar:.cyan/blue} {bytes}/{total_bytes} ({eta})",
-    )?
-    .progress_chars("#>-");
+    let mut manager = DownloadManager::new(pb)?;
+    manager.setup_progress_bar(asset_name, total_size)?;
 
-    pb.set_style(download_style);
-    pb.set_length(total_size);
-    pb.set_message(format!("Downloading {}", style(asset_name).cyan()));
-
-    let mut temp_file = NamedTempFile::new()?;
     let mut buffer = [0; 8192]; // 8KB buffer
-
     loop {
         let bytes_read = response.read(&mut buffer)?;
         if bytes_read == 0 {
             break;
         }
-        temp_file.write_all(&buffer[..bytes_read])?;
-        pb.inc(bytes_read as u64);
+        manager.write_chunk(&buffer[..bytes_read])?;
     }
 
-    Ok(temp_file)
+    Ok(manager.finish())
 }
 
 /// Finds a GitHub release asset URL for a specific version tag.
@@ -870,62 +914,86 @@ fn find_github_release_asset_url_by_tag(
         )
     })?;
 
-    let os_targets: Vec<&str> = match os {
-        "linux" => vec!["linux"],
-        "macos" => vec!["apple-darwin"],
-        "windows" => vec!["pc-windows-msvc"],
-        _ => return Err(anyhow!("Unsupported OS for Helix runtime: {}", os)),
-    };
+    // The name of the tool is the first part of the repo string (e.g., "helix-editor/helix" -> "helix")
+    let name = repo.split('/').last().unwrap_or(repo);
 
-    let ext = match os {
-        "linux" => "tar.xz",
-        "macos" | "windows" => "zip",
-        _ => return Err(anyhow!("Unsupported OS for Helix runtime: {}", os)),
-    };
+    find_best_asset_match(name, assets, os, arch).map_err(anyhow::Error::msg)
+}
 
-    for os_target in &os_targets {
-        let fragments_to_use = vec!["helix", tag, arch, *os_target, ext];
-        tracing::debug!(fragments = ?fragments_to_use, "Searching for asset");
+/// Selectively extracts a subdirectory (e.g., "runtime", "share") from an archive.
+/// The contents of the subdirectory are placed directly in the target directory.
+pub fn extract_sub_directory<R: Read + Seek>(
+    mut reader: R,
+    archive_type: ArchiveType,
+    target_dir: &Path,
+    sub_dir_name: &str,
+) -> AppResult<()> {
+    fs::create_dir_all(target_dir)?;
+    let sub_dir_pattern = format!("/{}/", sub_dir_name);
 
-        for asset in assets {
-            let name = asset["name"].as_str().unwrap_or("");
-            let lower_name = name.to_lowercase();
+    match archive_type {
+        ArchiveType::TarGz => {
+            let tar = GzDecoder::new(reader);
+            let mut archive = Archive::new(tar);
+            unpack_tar_sub_directory(&mut archive, target_dir, &sub_dir_pattern)?;
+        }
+        ArchiveType::TarXz => {
+            let tar = XzDecoder::new(reader);
+            let mut archive = Archive::new(tar);
+            unpack_tar_sub_directory(&mut archive, target_dir, &sub_dir_pattern)?;
+        }
+        ArchiveType::Zip => {
+            let mut archive = ZipArchive::new(&mut reader)?;
+            for i in 0..archive.len() {
+                let mut file = archive.by_index(i)?;
+                if let Some(enclosed_name) = file.enclosed_name() {
+                    if let Some(sub_dir_index) =
+                        enclosed_name.to_str().and_then(|s| s.find(&sub_dir_pattern))
+                    {
+                        // Get the path relative to the inside of the sub_dir.
+                        // e.g., for "themes/catppuccin.toml" inside "runtime", this is what we get.
+                        let relative_path_str =
+                            &enclosed_name.to_str().unwrap()[sub_dir_index + 1..];
+                        let relative_path = Path::new(relative_path_str);
+                        let outpath = target_dir.join(relative_path);
 
-            if fragments_to_use
-                .iter()
-                .all(|frag| lower_name.contains(&frag.to_lowercase()))
-            {
-                if let Some(url) = asset["browser_download_url"].as_str() {
-                    tracing::info!(asset = name, "Found matching release asset");
-                    return Ok((url.to_string(), name.to_string()));
+                        if file.name().ends_with('/') {
+                            fs::create_dir_all(&outpath)?;
+                        } else {
+                            if let Some(p) = outpath.parent() {
+                                if !p.exists() {
+                                    fs::create_dir_all(p)?;
+                                }
+                            }
+                            let mut outfile = fs::File::create(&outpath)?;
+                            io::copy(&mut file, &mut outfile)?;
+                        }
+                        #[cfg(unix)]
+                        if let Some(mode) = file.unix_mode() {
+                            fs::set_permissions(&outpath, fs::Permissions::from_mode(mode))?;
+                        }
+                    }
                 }
             }
         }
     }
-
-    Err(anyhow!(
-        "Could not find a matching Helix runtime release asset for tag {} on {} {}",
-        tag,
-        os,
-        arch
-    ))
+    Ok(())
 }
 
-/// Selectively extracts only the `runtime/` directory from a tar archive.
-pub fn extract_runtime_from_archive<R: io::Read>(
+/// Helper to unpack a subdirectory from a tar archive.
+fn unpack_tar_sub_directory<R: io::Read>(
     archive: &mut Archive<R>,
     target_dir: &Path,
+    sub_dir_pattern: &str,
 ) -> AppResult<()> {
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
         let path = entry.path()?;
 
-        // Check if the entry is within the 'runtime' directory.
-        // e.g., "helix-24.03-x86_64-linux/runtime/themes/catppuccin.toml"
-        if let Some(runtime_index) = path.to_str().and_then(|s| s.find("/runtime/")) {
-            // Get the path relative to the top-level folder inside the archive.
-            // e.g., "runtime/themes/catppuccin.toml"
-            let relative_path_str = &path.to_str().unwrap()[runtime_index + 1..];
+        // Find paths that are inside the subdirectory.
+        if let Some(sub_dir_index) = path.to_str().and_then(|s| s.find(sub_dir_pattern)) {
+            // Get the path relative to the inside of the subdirectory.
+            let relative_path_str = &path.to_str().unwrap()[sub_dir_index + 1..];
             let relative_path = Path::new(relative_path_str);
 
             let outpath = target_dir.join(relative_path);
@@ -936,40 +1004,6 @@ pub fn extract_runtime_from_archive<R: io::Read>(
                 }
             }
             entry.unpack(&outpath)?;
-        }
-    }
-    Ok(())
-}
-
-/// Selectively extracts only the `runtime/` directory from a zip archive.
-pub fn extract_runtime_from_zip_archive<R: io::Read + io::Seek>(
-    archive: &mut ZipArchive<R>,
-    target_dir: &Path,
-) -> AppResult<()> {
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        if let Some(enclosed_name) = file.enclosed_name() {
-            if let Some(runtime_index) = enclosed_name.to_str().and_then(|s| s.find("/runtime/")) {
-                let relative_path_str = &enclosed_name.to_str().unwrap()[runtime_index + 1..];
-                let relative_path = Path::new(relative_path_str);
-                let outpath = target_dir.join(relative_path);
-
-                if file.name().ends_with('/') {
-                    fs::create_dir_all(&outpath)?;
-                } else {
-                    if let Some(p) = outpath.parent() {
-                        if !p.exists() {
-                            fs::create_dir_all(p)?;
-                        }
-                    }
-                    let mut outfile = fs::File::create(&outpath)?;
-                    io::copy(&mut file, &mut outfile)?;
-                }
-                #[cfg(unix)]
-                if let Some(mode) = file.unix_mode() {
-                    fs::set_permissions(&outpath, fs::Permissions::from_mode(mode))?;
-                }
-            }
         }
     }
     Ok(())

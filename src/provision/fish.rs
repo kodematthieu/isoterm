@@ -1,14 +1,12 @@
 use super::{
-    ProvisionContext, Tool, create_symlink, download_to_temp_file, extract_archive,
-    find_github_release_asset_url, provision_source_share,
+    ArchiveType, ProvisionContext, Tool, create_symlink, download_to_temp_file,
+    extract_full_archive, find_github_release_asset_url, provision_source_share,
 };
 use crate::error::AppResult;
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::env;
 use std::fs;
-use tar::Archive;
-use xz2::read::XzDecoder;
 
 pub struct Fish;
 
@@ -56,9 +54,8 @@ impl Tool for Fish {
         let fish_runtime_dir = context.env_dir.join("fish_runtime");
         fs::create_dir_all(&fish_runtime_dir)?;
 
-        let tar = XzDecoder::new(file);
-        let mut archive = Archive::new(tar);
-        extract_archive(&mut archive, &fish_runtime_dir)?;
+        let archive_type = ArchiveType::from_asset_name(&asset_name)?;
+        extract_full_archive(file, archive_type, &fish_runtime_dir)?;
 
         let binary_path_in_archive = fish_runtime_dir.join("bin").join(self.binary_name());
         let tool_path_in_env = context.env_dir.join("bin").join(self.binary_name());

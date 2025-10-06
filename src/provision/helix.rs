@@ -1,9 +1,7 @@
-use super::{
-    ProvisionContext, Tool, download_and_install_archive, provision_helix_runtime_for_symlink,
-};
+use super::{ProvisionContext, Tool, provision_helix_runtime_for_symlink};
 use crate::error::AppResult;
 use anyhow::Context;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressBar;
 use shellexpand;
 use std::path::Path;
 use tokio::task;
@@ -24,28 +22,14 @@ impl Tool for Helix {
     }
 
     fn path_in_archive(&self) -> Option<&'static str> {
+        // The binary is at the root of the archive, e.g., "helix-23.10-x86_64-linux/hx"
+        // The top-level directory is stripped during extraction.
         Some("hx")
     }
 
-    #[tracing::instrument(skip(self, context, pb, spinner_style), fields(tool = self.name()))]
-    async fn provision_from_source(
-        &self,
-        context: &ProvisionContext,
-        pb: &ProgressBar,
-        spinner_style: &ProgressStyle,
-    ) -> AppResult<()> {
-        download_and_install_archive(
-            &context.env_dir,
-            self.name(),
-            self.repo(),
-            self.binary_name(),
-            self.path_in_archive().unwrap_or_default(),
-            pb,
-            spinner_style,
-            &context.client,
-        )
-        .await
-    }
+    // `provision_from_source` is intentionally not implemented.
+    // It will fall back to the default `Tool` trait's implementation,
+    // which correctly handles the `FullArchive` strategy because `path_in_archive` returns `Some`.
 
     #[tracing::instrument(skip(self, context, pb, system_path), fields(tool = self.name()))]
     async fn post_symlink_hook(
