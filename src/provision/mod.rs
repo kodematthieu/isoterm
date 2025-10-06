@@ -554,7 +554,7 @@ fn find_best_asset_match(
         "zip"
     } else {
         match name {
-            "helix" if os == "linux" => "tar.xz",
+            "helix" if os == "linux" || os == "android" => "tar.xz",
             "helix" if os == "macos" => "zip",
             "fish" => "tar.xz",
             _ => "tar.gz",
