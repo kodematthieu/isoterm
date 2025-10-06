@@ -85,6 +85,10 @@ async fn run() -> AppResult<()> {
         fs::create_dir_all(&data_dir)?;
         tracing::trace!(path = %data_dir.display(), "Created data directory");
 
+        // --- Create the configuration overlay ---
+        config::symlink_unmanaged_configs(&env_dir)?;
+        tracing::info!("Created symlink overlay for unmanaged configurations");
+
         // --- Overall Progress Bar ---
         let tools_to_provision = ["fish", "starship", "zoxide", "atuin", "ripgrep", "helix"];
         let total_steps = (tools_to_provision.len() + 1) as u64; // Tools + config step

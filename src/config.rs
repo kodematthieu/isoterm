@@ -1,9 +1,7 @@
-use crate::error::AppResult;
-use anyhow::{Context, anyhow};
+use crate::{error::AppResult, provision::create_symlink};
+use anyhow::{anyhow, Context};
 use indicatif::ProgressBar;
-use std::fs;
-use std::path::Path;
-use std::process::Command;
+use std::{collections::HashSet, fs, path::Path, process::Command};
 
 /// Generates all necessary configuration files and the activation script.
 #[tracing::instrument(skip(pb), fields(env_dir = %env_dir.display()))]
@@ -73,6 +71,13 @@ fn write_starship_config(env_dir: &Path) -> AppResult<()> {
     let config_path = env_dir.join("config").join("starship.toml");
     let starship_bin = env_dir.join("bin").join("starship");
 
+    // START MODIFICATION: Remove symlink if it exists
+    if config_path.is_symlink() {
+        tracing::debug!(path = %config_path.display(), "Removing existing symlink for managed config file");
+        fs::remove_file(&config_path)?;
+    }
+    // END MODIFICATION
+
     tracing::trace!(path = %config_path.display(), "Generating starship config");
 
     let status = Command::new(&starship_bin)
@@ -122,4 +127,47 @@ fn write_helix_config(env_dir: &Path) -> AppResult<()> {
         "config/helix/languages.toml",
         languages_toml_content,
     )
+}
+
+/// Symlinks all directories from the user's global ~/.config into the
+/// environment's config dir, except for those managed by this tool.
+#[tracing::instrument(skip_all, fields(env_dir = %env_dir.display()))]
+pub fn symlink_unmanaged_configs(env_dir: &Path) -> AppResult<()> {
+    let global_config_dir_str = shellexpand::tilde("~/.config").to_string();
+    let global_config_dir = Path::new(&global_config_dir_str);
+    let env_config_dir = env_dir.join("config");
+
+    if !global_config_dir.is_dir() {
+        tracing::warn!(path = %global_config_dir.display(), "Global config directory not found, skipping symlink step.");
+        return Ok(());
+    }
+
+    let managed_configs: HashSet<&str> =
+        ["fish", "starship", "atuin", "helix", "starship.toml"]
+            .iter()
+            .cloned()
+            .collect();
+
+    tracing::debug!("Symlinking unmanaged configs");
+    for entry in fs::read_dir(&global_config_dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let file_name_str = file_name.to_string_lossy();
+
+        if !managed_configs.contains(file_name_str.as_ref()) {
+            let source_path = entry.path();
+            let dest_path = env_config_dir.join(file_name_str.as_ref());
+            create_symlink(&source_path, &dest_path).with_context(|| {
+                format!(
+                    "Failed to symlink unmanaged config from {} to {}",
+                    source_path.display(),
+                    dest_path.display()
+                )
+            })?;
+        } else {
+            tracing::trace!(config = %file_name_str, "Skipping symlink for managed config");
+        }
+    }
+
+    Ok(())
 }
