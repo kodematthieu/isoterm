@@ -1029,49 +1029,53 @@ pub fn extract_sub_directory<R: Read + Seek>(
     sub_dir_name: &str,
 ) -> AppResult<()> {
     fs::create_dir_all(target_dir)?;
-    let sub_dir_pattern = format!("/{}/", sub_dir_name);
 
     match archive_type {
         ArchiveType::TarGz => {
             let tar = GzDecoder::new(reader);
             let mut archive = Archive::new(tar);
-            unpack_tar_sub_directory(&mut archive, target_dir, &sub_dir_pattern)?;
+            unpack_tar_sub_directory(&mut archive, target_dir, sub_dir_name)?;
         }
         ArchiveType::TarXz => {
             let tar = XzDecoder::new(reader);
             let mut archive = Archive::new(tar);
-            unpack_tar_sub_directory(&mut archive, target_dir, &sub_dir_pattern)?;
+            unpack_tar_sub_directory(&mut archive, target_dir, sub_dir_name)?;
         }
         ArchiveType::Zip => {
             let mut archive = ZipArchive::new(&mut reader)?;
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i)?;
                 if let Some(enclosed_name) = file.enclosed_name() {
-                    if let Some(sub_dir_index) = enclosed_name
-                        .to_str()
-                        .and_then(|s| s.find(&sub_dir_pattern))
-                    {
-                        // Get the path relative to the inside of the sub_dir.
-                        // e.g., for "themes/catppuccin.toml" inside "runtime", this is what we get.
-                        let relative_path_str =
-                            &enclosed_name.to_str().unwrap()[sub_dir_index + 1..];
-                        let relative_path = Path::new(relative_path_str);
-                        let outpath = target_dir.join(relative_path);
+                    let components = enclosed_name.components();
+                    let mut sub_path_components =
+                        components.skip_while(|c| c.as_os_str() != sub_dir_name);
 
-                        if file.name().ends_with('/') {
-                            fs::create_dir_all(&outpath)?;
-                        } else {
-                            if let Some(p) = outpath.parent() {
-                                if !p.exists() {
-                                    fs::create_dir_all(p)?;
+                    if let Some(first_comp) = sub_path_components.next() {
+                        if first_comp.as_os_str() == sub_dir_name {
+                            let relative_path: PathBuf = sub_path_components.collect();
+
+                            if !relative_path.as_os_str().is_empty() {
+                                let outpath = target_dir.join(relative_path);
+
+                                if file.name().ends_with('/') {
+                                    fs::create_dir_all(&outpath)?;
+                                } else {
+                                    if let Some(p) = outpath.parent() {
+                                        if !p.exists() {
+                                            fs::create_dir_all(p)?;
+                                        }
+                                    }
+                                    let mut outfile = fs::File::create(&outpath)?;
+                                    io::copy(&mut file, &mut outfile)?;
+                                }
+                                #[cfg(unix)]
+                                if let Some(mode) = file.unix_mode() {
+                                    fs::set_permissions(
+                                        &outpath,
+                                        fs::Permissions::from_mode(mode),
+                                    )?;
                                 }
                             }
-                            let mut outfile = fs::File::create(&outpath)?;
-                            io::copy(&mut file, &mut outfile)?;
-                        }
-                        #[cfg(unix)]
-                        if let Some(mode) = file.unix_mode() {
-                            fs::set_permissions(&outpath, fs::Permissions::from_mode(mode))?;
                         }
                     }
                 }
@@ -1085,26 +1089,34 @@ pub fn extract_sub_directory<R: Read + Seek>(
 fn unpack_tar_sub_directory<R: io::Read>(
     archive: &mut Archive<R>,
     target_dir: &Path,
-    sub_dir_pattern: &str,
+    sub_dir_name: &str,
 ) -> AppResult<()> {
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
         let path = entry.path()?;
 
-        // Find paths that are inside the subdirectory.
-        if let Some(sub_dir_index) = path.to_str().and_then(|s| s.find(sub_dir_pattern)) {
-            // Get the path relative to the inside of the subdirectory.
-            let relative_path_str = &path.to_str().unwrap()[sub_dir_index + 1..];
-            let relative_path = Path::new(relative_path_str);
+        // Find if the target subdirectory exists in the path components
+        let components = path.components();
+        let mut sub_path_components = components.skip_while(|c| c.as_os_str() != sub_dir_name);
 
-            let outpath = target_dir.join(relative_path);
+        // The first component of sub_path_components should be our sub_dir_name
+        if let Some(first_comp) = sub_path_components.next() {
+            if first_comp.as_os_str() == sub_dir_name {
+                // The rest of the iterator contains the path relative to the sub_dir
+                let relative_path: PathBuf = sub_path_components.collect();
 
-            if let Some(p) = outpath.parent() {
-                if !p.exists() {
-                    fs::create_dir_all(p)?;
+                // We only care about the *contents* of the subdirectory.
+                if !relative_path.as_os_str().is_empty() {
+                    let outpath = target_dir.join(relative_path);
+
+                    if let Some(p) = outpath.parent() {
+                        if !p.exists() {
+                            fs::create_dir_all(p)?;
+                        }
+                    }
+                    entry.unpack(&outpath)?;
                 }
             }
-            entry.unpack(&outpath)?;
         }
     }
     Ok(())
