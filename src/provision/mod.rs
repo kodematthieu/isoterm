@@ -915,6 +915,43 @@ pub fn provision_helix_runtime_for_symlink(
     Ok(())
 }
 
+/// For a symlinked Fish, provisions a local runtime ('share' directory).
+#[tracing::instrument(skip(system_fish_path, env_dir, pb))]
+pub fn provision_fish_runtime_for_symlink(
+    system_fish_path: &Path,
+    env_dir: &Path,
+    pb: &ProgressBar,
+) -> AppResult<()> {
+    // 1. Get Fish version from the system binary.
+    let version_output = get_binary_version(system_fish_path, "--version")?;
+    let version_tag = parse_fish_version_tag(&version_output)?;
+    tracing::debug!(version = %version_tag, "Parsed fish version from symlinked binary");
+
+    // 2. Find the GitHub release asset URL for that specific tag.
+    let (download_url, asset_name) = find_github_release_asset_url_by_tag(
+        "fish-shell/fish-shell",
+        &version_tag,
+        env::consts::OS,
+        env::consts::ARCH,
+        "https://api.github.com",
+    )?;
+
+    // 3. Download the archive to a temp file.
+    let temp_file = download_to_temp_file_blocking(&download_url, &asset_name, pb)?;
+
+    // 4. Selectively extract ONLY the `share` directory.
+    let fish_runtime_dir = env_dir.join("fish_runtime");
+    fs::create_dir_all(&fish_runtime_dir)?;
+    tracing::debug!(path = %fish_runtime_dir.display(), "Ensured fish_runtime directory exists");
+
+    let file = temp_file.reopen()?;
+    let archive_type = ArchiveType::from_asset_name(&asset_name)?;
+    extract_sub_directory(file, archive_type, &fish_runtime_dir, "share")?;
+
+    tracing::info!("Successfully provisioned local Fish runtime ('share' directory).");
+    Ok(())
+}
+
 /// Executes a binary with a given argument to get its version string.
 fn get_binary_version(path: &Path, arg: &str) -> AppResult<String> {
     let output = Command::new(path)
@@ -939,6 +976,19 @@ fn parse_helix_version_tag(version_output: &str) -> AppResult<String> {
     let caps = re.captures(version_output).ok_or_else(|| {
         anyhow!(
             "Failed to parse Helix version from output: '{}'",
+            version_output
+        )
+    })?;
+    Ok(caps.get(1).unwrap().as_str().to_string())
+}
+
+/// Parses the Fish version tag (e.g., "3.7.1") from the command output.
+fn parse_fish_version_tag(version_output: &str) -> AppResult<String> {
+    // Example output: "fish, version 3.7.1"
+    let re = Regex::new(r"fish, version (\d+\.\d+\.\d+)")?;
+    let caps = re.captures(version_output).ok_or_else(|| {
+        anyhow!(
+            "Failed to parse Fish version from output: '{}'",
             version_output
         )
     })?;
