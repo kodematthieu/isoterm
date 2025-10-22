@@ -36,6 +36,4 @@ else
 fi
 
 # 5. Execute fish: Replace the current shell process with fish.
-#    The `-C` flag executes a command, in this case sourcing our custom config,
-#    which will be located at $XDG_CONFIG_HOME/fish/config.fish.
-exec "$ENV_DIR/bin/fish" -l -C "source '$XDG_CONFIG_HOME/fish/config.fish'"
+exec "$ENV_DIR/bin/fish" -l

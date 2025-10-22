@@ -1,11 +1,14 @@
 set fish_data_dir (string split ':' $XDG_DATA_DIRS)[1]
 
 if status is-interactive
-    fastfetch
     starship init fish | source
     atuin init fish | source
     zoxide init fish | string replace --regex \
         -- '\$__fish_data_dir' $fish_data_dir | source
+end
+
+function fish_greeting
+    fastfetch
 end
 
 # ------------------------------------------------------------------------------
