@@ -969,6 +969,7 @@ fn download_to_temp_file_blocking(
 
     let mut response = reqwest::blocking::Client::builder()
         .user_agent("isoterm")
+        .timeout(Duration::from_secs(300)) // 5 minutes
         .build()?
         .get(url)
         .send()?
