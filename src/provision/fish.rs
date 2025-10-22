@@ -1,14 +1,10 @@
 use super::{
-    provision_fish_runtime_for_symlink, ArchiveType, ProvisionContext, Tool, create_symlink,
-    download_to_temp_file, extract_full_archive, find_github_release_asset_url,
-    provision_source_share,
+    provision_fish_runtime_for_symlink, provision_source_share, AssetSpec, ProvisionContext, Tool,
 };
 use crate::error::AppResult;
+use std::borrow::Cow;
 use anyhow::Context;
-use console::style;
-use indicatif::{ProgressBar, ProgressStyle};
-use std::env;
-use std::fs;
+use indicatif::ProgressBar;
 use std::path::Path;
 use tokio::task;
 
@@ -27,47 +23,44 @@ impl Tool for Fish {
         "fish"
     }
 
+    fn asset_spec<'a>(&self, os: &'a str, arch: &'a str) -> AppResult<AssetSpec<'a>> {
+        let os_keyword = match os {
+            "linux" | "android" => "linux",
+            _ => os,
+        };
+
+        Ok(AssetSpec {
+            os_keywords: vec![os_keyword],
+            arch_keyword: arch,
+            extension: "tar.xz",
+            name_keyword: Cow::from(self.name()),
+        })
+    }
+
+    // Fish requires a `FullArchive` extraction, but also needs to ensure the `share`
+    // directory is present, which is not always in the release archive. So we
+    // override the default `provision_from_source`.
     #[tracing::instrument(skip(self, context, pb, spinner_style), fields(tool = self.name()))]
     async fn provision_from_source(
         &self,
         context: &ProvisionContext,
         pb: &ProgressBar,
-        spinner_style: &ProgressStyle,
+        spinner_style: &super::ProgressStyle,
     ) -> AppResult<()> {
-        // --- Fish-specific download and extraction ---
-        pb.set_message(format!("Downloading {}...", style(self.name()).bold()));
-        let (download_url, asset_name) = find_github_release_asset_url(
-            self.name(),
-            self.repo(),
-            "https://api.github.com",
-            env::consts::OS,
-            env::consts::ARCH,
-            &context.client,
+        super::provision_from_github_release(
+            context,
+            self,
+            super::ExtractionStrategy::FullArchive {
+                path_in_archive: "fish",
+            },
+            pb,
+            spinner_style,
         )
         .await?;
-        let temp_file =
-            download_to_temp_file(&download_url, &asset_name, pb, &context.client).await?;
-        let file = temp_file.reopen()?;
 
-        pb.set_style(spinner_style.clone());
-        pb.set_message(format!(
-            "Extracting archive for {}...",
-            style(self.name()).bold()
-        ));
-
-        let fish_runtime_dir = context.env_dir.join("fish_runtime");
-        fs::create_dir_all(&fish_runtime_dir)?;
-
-        let archive_type = ArchiveType::from_asset_name(&asset_name)?;
-        extract_full_archive(file, archive_type, &fish_runtime_dir)?;
-
-        let binary_path_in_archive = fish_runtime_dir.join(self.binary_name());
-        let tool_path_in_env = context.env_dir.join("bin").join(self.binary_name());
-        create_symlink(&binary_path_in_archive, &tool_path_in_env)?;
-
-        // --- Fish-specific 'share' directory provisioning ---
         // This is necessary because some release archives (like for macOS) don't
-        // include the 'share' directory, which contains completions and other essential files.
+        // include the 'share' directory, which has completions, etc.
+        let fish_runtime_dir = context.env_dir.join("fish_runtime");
         if !fish_runtime_dir.join("share").exists() {
             provision_source_share(
                 &fish_runtime_dir,

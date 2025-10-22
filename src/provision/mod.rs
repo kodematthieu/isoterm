@@ -37,10 +37,84 @@ pub mod starship;
 pub mod zoxide;
 
 // --- Tool Trait ---
+
+use std::borrow::Cow;
+/// Holds the specifications for finding a tool's release asset.
+pub struct AssetSpec<'a> {
+    pub os_keywords: Vec<&'a str>,
+    pub arch_keyword: &'a str,
+    pub extension: &'a str,
+    pub name_keyword: Cow<'a, str>,
+}
+
 pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     fn repo(&self) -> &'static str;
     fn binary_name(&self) -> &'static str;
+
+    /// Provides the specifications for finding the correct release asset for this tool.
+    /// The default implementation covers the common case where the asset name is
+    /// composed of the tool name, architecture, OS, and a .tar.gz extension.
+    fn asset_spec<'a>(&self, os: &'a str, arch: &'a str) -> AppResult<AssetSpec<'a>> {
+        let os_targets: Vec<&str> = match os {
+            "linux" => {
+                let mut gnu_preferred = true;
+
+                #[cfg(target_os = "linux")]
+                {
+                    // Atuin's GNU binary is built against glibc 2.35.
+                    // If the system's glibc is older, we prefer musl.
+                    const MIN_GLIBC_VERSION: (u32, u32) = (2, 35);
+
+                    if let Some((major, minor)) = get_glibc_version() {
+                        if (major, minor) < MIN_GLIBC_VERSION {
+                            tracing::info!(
+                                "System glibc version {}.{} is older than required {}.{}. Prioritizing musl build.",
+                                major,
+                                minor,
+                                MIN_GLIBC_VERSION.0,
+                                MIN_GLIBC_VERSION.1
+                            );
+                            gnu_preferred = false;
+                        }
+                    } else {
+                        tracing::warn!(
+                            "Could not determine glibc version. Defaulting to musl for safety."
+                        );
+                        gnu_preferred = false; // Default to safer musl if check fails
+                    }
+                }
+
+                if gnu_preferred {
+                    vec!["unknown-linux-gnu", "unknown-linux-musl"]
+                } else {
+                    vec!["unknown-linux-musl", "unknown-linux-gnu"]
+                }
+            }
+            "android" => {
+                // Android does not use glibc, so musl is the only viable choice.
+                vec!["unknown-linux-musl"]
+            }
+            "macos" => vec!["apple-darwin"],
+            "windows" => vec!["pc-windows-msvc"],
+            _ => {
+                return Err(UserError::UnsupportedPlatform {
+                    name: self.name().to_string(),
+                    os: os.to_string(),
+                }
+                .into())
+            }
+        };
+
+        let extension = if os == "windows" { "zip" } else { "tar.gz" };
+
+        Ok(AssetSpec {
+            os_keywords: os_targets,
+            arch_keyword: arch,
+            extension,
+            name_keyword: Cow::from(self.name()),
+        })
+    }
 
     /// The path of the binary within the downloaded archive, if it's not at the root.
     fn path_in_archive(&self) -> Option<&'static str> {
@@ -65,16 +139,7 @@ pub trait Tool: Send + Sync {
             }
         };
 
-        provision_from_github_release(
-            context,
-            self.name(),
-            self.repo(),
-            self.binary_name(),
-            strategy,
-            pb,
-            spinner_style,
-        )
-        .await
+        provision_from_github_release(context, self, strategy, pb, spinner_style).await
     }
 
     /// A hook that runs after a symlink is created to a system-provided tool.
@@ -328,20 +393,17 @@ pub enum ExtractionStrategy<'a> {
 
 /// A unified function to download a tool from a GitHub release and install it
 /// based on the specified extraction strategy.
-#[tracing::instrument(skip(context, pb, spinner_style))]
-pub async fn provision_from_github_release<'a>(
+#[tracing::instrument(skip(context, tool, pb, spinner_style), fields(tool = tool.name()))]
+pub async fn provision_from_github_release<'a, T: Tool + ?Sized>(
     context: &ProvisionContext,
-    name: &'a str,
-    repo: &'a str,
-    binary_name: &'a str,
+    tool: &T,
     strategy: ExtractionStrategy<'a>,
     pb: &ProgressBar,
     spinner_style: &ProgressStyle,
 ) -> AppResult<()> {
     // 1. Find the asset URL
     let (download_url, asset_name) = find_github_release_asset_url(
-        name,
-        repo,
+        tool,
         "https://api.github.com",
         env::consts::OS,
         env::consts::ARCH,
@@ -370,19 +432,25 @@ pub async fn provision_from_github_release<'a>(
             }
         }
         ExtractionStrategy::FullArchive { path_in_archive } => {
-            pb.set_message(format!("Extracting archive for {}...", style(name).bold()));
-            let tool_dir = context.env_dir.join(name);
+            pb.set_message(format!(
+                "Extracting archive for {}...",
+                style(tool.name()).bold()
+            ));
+            let tool_dir = context.env_dir.join(tool.name());
             fs::create_dir_all(&tool_dir)?;
 
             extract_full_archive(file, archive_type, &tool_dir)?;
 
             let binary_path_in_archive = tool_dir.join(path_in_archive);
-            let binary_path_in_env = context.env_dir.join("bin").join(binary_name);
+            let binary_path_in_env = context.env_dir.join("bin").join(tool.binary_name());
             create_symlink(&binary_path_in_archive, &binary_path_in_env)?;
         }
     }
 
-    pb.set_message(format!("Installed {} successfully", style(name).bold()));
+    pb.set_message(format!(
+        "Installed {} successfully",
+        style(tool.name()).bold()
+    ));
     Ok(())
 }
 
@@ -466,10 +534,9 @@ pub enum ReleaseSpecifier<'a> {
 
 /// A generic, asynchronous function to find a release asset URL from the GitHub API.
 /// It can target either the latest release or a release by a specific tag.
-#[tracing::instrument(skip(client), fields(repo = repo, os = os, arch = arch))]
-async fn find_release_asset(
-    name: &str,
-    repo: &str,
+#[tracing::instrument(skip(tool, client), fields(tool = tool.name(), os = os, arch = arch))]
+async fn find_release_asset<T: Tool + ?Sized>(
+    tool: &T,
     specifier: ReleaseSpecifier<'_>,
     base_url: &str,
     os: &str,
@@ -480,9 +547,9 @@ async fn find_release_asset(
 
     Retry::spawn(retry_strategy, || async {
         let repo_url = match specifier {
-            ReleaseSpecifier::Latest => format!("{}/repos/{}/releases/latest", base_url, repo),
+            ReleaseSpecifier::Latest => format!("{}/repos/{}/releases/latest", base_url, tool.repo()),
             ReleaseSpecifier::Tag(tag) => {
-                format!("{}/repos/{}/releases/tags/{}", base_url, repo, tag)
+                format!("{}/repos/{}/releases/tags/{}", base_url, tool.repo(), tag)
             }
         };
         tracing::debug!(url = %repo_url, "Fetching release from GitHub API");
@@ -501,130 +568,35 @@ async fn find_release_asset(
         let assets = response_value["assets"].as_array().ok_or_else(|| {
             anyhow!(
                 "No assets found in release for {}. The release might be empty or the API response changed.",
-                repo
+                tool.repo()
             )
         })?;
 
-        find_best_asset_match(name, assets, os, arch).map_err(|e| e.into())
+        find_best_asset_match(tool, assets, os, arch).map_err(|e| e.into())
     })
     .await
 }
 
 /// The core asset-matching logic, extracted into a synchronous function
 /// so it can be shared by both async and blocking API callers.
-fn find_best_asset_match(
-    name: &str,
+fn find_best_asset_match<T: Tool + ?Sized>(
+    tool: &T,
     assets: &[Value],
     os: &str,
     arch: &str,
 ) -> AppResult<(String, String)> {
     tracing::debug!(asset_count = assets.len(), "Found release assets");
 
-    if name == "fastfetch" {
-        let arch_keyword = match arch {
-            "x86_64" => "amd64",
-            "aarch64" => "aarch64",
-            _ => arch,
-        };
-        let os_keyword = match os {
-            "macos" => "macos",
-            _ => "linux",
-        };
-        let target_fragment = format!("{}-{}-{}.tar.gz", name, os_keyword, arch_keyword);
+    let spec = tool.asset_spec(os, arch)?;
 
-        for asset in assets {
-            if let Some(asset_name) = asset["name"].as_str() {
-                if asset_name.ends_with(&target_fragment) {
-                    if let Some(url) = asset["browser_download_url"].as_str() {
-                        tracing::info!(asset = asset_name, "Found matching fastfetch release asset");
-                        return Ok((url.to_string(), asset_name.to_string()));
-                    }
-                }
-            }
-        }
-    }
-
-    let os_targets: Vec<&str> = match os {
-        "linux" => {
-            let mut gnu_preferred = true;
-
-            #[cfg(target_os = "linux")]
-            {
-                // Atuin's GNU binary is built against glibc 2.35.
-                // If the system's glibc is older, we prefer musl.
-                const MIN_GLIBC_VERSION: (u32, u32) = (2, 35);
-
-                if let Some((major, minor)) = get_glibc_version() {
-                    if (major, minor) < MIN_GLIBC_VERSION {
-                        tracing::info!(
-                            "System glibc version {}.{} is older than required {}.{}. Prioritizing musl build.",
-                            major,
-                            minor,
-                            MIN_GLIBC_VERSION.0,
-                            MIN_GLIBC_VERSION.1
-                        );
-                        gnu_preferred = false;
-                    }
-                } else {
-                    tracing::warn!(
-                        "Could not determine glibc version. Defaulting to musl for safety."
-                    );
-                    gnu_preferred = false; // Default to safer musl if check fails
-                }
-            }
-
-            let default_targets = if gnu_preferred {
-                vec!["unknown-linux-gnu", "unknown-linux-musl"]
-            } else {
-                vec!["unknown-linux-musl", "unknown-linux-gnu"]
-            };
-
-            match name {
-                "fish" | "helix" => vec!["linux"],
-                _ => default_targets,
-            }
-        }
-        "android" => {
-            // Android does not use glibc, so musl is the only viable choice.
-            match name {
-                "fish" | "helix" => vec!["linux"],
-                // Do not allow "unknown-linux-gnu" on Android.
-                _ => vec!["unknown-linux-musl"],
-            }
-        }
-        "macos" => vec!["apple-darwin"],
-        "windows" => vec!["pc-windows-msvc"],
-        _ => {
-            return Err(UserError::UnsupportedPlatform {
-                name: name.to_string(),
-                os: os.to_string(),
-            }
-            .into())
-        }
-    };
-
-    let ext = if os == "windows" {
-        "zip"
-    } else {
-        match name {
-            "helix" if os == "linux" || os == "android" => "tar.xz",
-            "helix" if os == "macos" => "zip",
-            "fish" => "tar.xz",
-            _ => "tar.gz",
-        }
-    };
-
-    for os_target in &os_targets {
-        // For Helix, the tag is part of the asset name, but `name` is "helix-editor/helix".
-        // We only want to match against "helix".
-        let name_to_match = if name.contains('/') {
-            name.split('/').last().unwrap_or(name)
-        } else {
-            name
-        };
-
-        let fragments_to_use = vec![name_to_match, arch, *os_target, ext];
-        tracing::debug!(fragments = ?fragments_to_use, "Searching for asset");
+    for os_target in &spec.os_keywords {
+        let fragments_to_use = vec![
+            spec.name_keyword.as_ref(),
+            spec.arch_keyword,
+            *os_target,
+            spec.extension,
+        ];
+        tracing::debug!(fragments = ?fragments_to_use, "Searching for asset with fragments");
 
         for asset in assets {
             let asset_name = asset["name"].as_str().unwrap_or("");
@@ -643,32 +615,22 @@ fn find_best_asset_match(
     }
 
     Err(UserError::AssetNotFound {
-        name: name.to_string(),
+        name: tool.name().to_string(),
         os: os.to_string(),
         arch: arch.to_string(),
     }
     .into())
 }
 
-#[tracing::instrument(skip(client), fields(repo = repo, os = os, arch = arch))]
-async fn find_github_release_asset_url(
-    name: &str,
-    repo: &str,
+#[tracing::instrument(skip(tool, client), fields(tool = tool.name(), os = os, arch = arch))]
+async fn find_github_release_asset_url<T: Tool + ?Sized>(
+    tool: &T,
     base_url: &str,
     os: &str,
     arch: &str,
     client: &reqwest::Client,
 ) -> AppResult<(String, String)> {
-    find_release_asset(
-        name,
-        repo,
-        ReleaseSpecifier::Latest,
-        base_url,
-        os,
-        arch,
-        client,
-    )
-    .await
+    find_release_asset(tool, ReleaseSpecifier::Latest, base_url, os, arch, client).await
 }
 
 #[derive(Debug)]
@@ -891,8 +853,9 @@ pub fn provision_helix_runtime_for_symlink(
     tracing::debug!(version = %version_tag, "Parsed helix version from symlinked binary");
 
     // 2. Find the GitHub release asset URL for that specific tag.
+    let helix_tool = crate::provision::helix::Helix;
     let (download_url, asset_name) = find_github_release_asset_url_by_tag(
-        "helix-editor/helix",
+        &helix_tool,
         &version_tag,
         env::consts::OS,
         env::consts::ARCH,
@@ -928,8 +891,9 @@ pub fn provision_fish_runtime_for_symlink(
     tracing::debug!(version = %version_tag, "Parsed fish version from symlinked binary");
 
     // 2. Find the GitHub release asset URL for that specific tag.
+    let fish_tool = crate::provision::fish::Fish;
     let (download_url, asset_name) = find_github_release_asset_url_by_tag(
-        "fish-shell/fish-shell",
+        &fish_tool,
         &version_tag,
         env::consts::OS,
         env::consts::ARCH,
@@ -1028,15 +992,15 @@ fn download_to_temp_file_blocking(
 }
 
 /// Finds a GitHub release asset URL for a specific version tag.
-#[tracing::instrument(fields(repo = repo, tag = tag, os = os, arch = arch))]
-fn find_github_release_asset_url_by_tag(
-    repo: &str,
+#[tracing::instrument(skip(tool), fields(tool = tool.name(), tag = tag, os = os, arch = arch))]
+fn find_github_release_asset_url_by_tag<T: Tool + ?Sized>(
+    tool: &T,
     tag: &str,
     os: &str,
     arch: &str,
     base_url: &str,
 ) -> AppResult<(String, String)> {
-    let repo_url = format!("{}/repos/{}/releases/tags/{}", base_url, repo, tag);
+    let repo_url = format!("{}/repos/{}/releases/tags/{}", base_url, tool.repo(), tag);
     tracing::debug!(url = %repo_url, "Fetching release by tag from GitHub API");
 
     let response: Value = reqwest::blocking::Client::new()
@@ -1049,14 +1013,11 @@ fn find_github_release_asset_url_by_tag(
     let assets = response["assets"].as_array().ok_or_else(|| {
         anyhow!(
             "No assets found in release {} for {}. The release might be empty or the API response changed.",
-            tag, repo
+            tag, tool.repo()
         )
     })?;
 
-    // The name of the tool is the first part of the repo string (e.g., "helix-editor/helix" -> "helix")
-    let name = repo.split('/').last().unwrap_or(repo);
-
-    find_best_asset_match(name, assets, os, arch).map_err(anyhow::Error::msg)
+    find_best_asset_match(tool, assets, os, arch)
 }
 
 /// Selectively extracts a subdirectory (e.g., "runtime", "share") from an archive.

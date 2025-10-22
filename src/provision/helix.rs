@@ -1,6 +1,7 @@
-use super::{ProvisionContext, Tool, provision_helix_runtime_for_symlink};
+use super::{AssetSpec, ProvisionContext, Tool, provision_helix_runtime_for_symlink};
 use crate::error::AppResult;
 use anyhow::Context;
+use std::borrow::Cow;
 use indicatif::ProgressBar;
 use shellexpand;
 use std::path::Path;
@@ -19,6 +20,27 @@ impl Tool for Helix {
 
     fn binary_name(&self) -> &'static str {
         "hx"
+    }
+
+    fn asset_spec<'a>(&self, os: &'a str, arch: &'a str) -> AppResult<AssetSpec<'a>> {
+        let os_keyword = match os {
+            "linux" | "android" => "linux",
+            "macos" => "macos",
+            _ => os,
+        };
+
+        let extension = match os {
+            "linux" | "android" => "tar.xz",
+            "macos" => "zip",
+            _ => "tar.gz", // Default, though unlikely to be used for Helix
+        };
+
+        Ok(AssetSpec {
+            os_keywords: vec![os_keyword],
+            arch_keyword: arch,
+            extension,
+            name_keyword: Cow::from("helix"), // The repo name is helix-editor/helix, but assets just use "helix"
+        })
     }
 
     fn path_in_archive(&self) -> Option<&'static str> {
