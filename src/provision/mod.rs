@@ -29,6 +29,7 @@ use std::os::windows::fs::{symlink_dir, symlink_file};
 
 // --- Module Declarations ---
 pub mod atuin;
+pub mod fastfetch;
 pub mod fish;
 pub mod helix;
 pub mod ripgrep;
@@ -518,6 +519,30 @@ fn find_best_asset_match(
     arch: &str,
 ) -> AppResult<(String, String)> {
     tracing::debug!(asset_count = assets.len(), "Found release assets");
+
+    if name == "fastfetch" {
+        let arch_keyword = match arch {
+            "x86_64" => "amd64",
+            "aarch64" => "aarch64",
+            _ => arch,
+        };
+        let os_keyword = match os {
+            "macos" => "macos",
+            _ => "linux",
+        };
+        let target_fragment = format!("{}-{}-{}.tar.gz", name, os_keyword, arch_keyword);
+
+        for asset in assets {
+            if let Some(asset_name) = asset["name"].as_str() {
+                if asset_name.ends_with(&target_fragment) {
+                    if let Some(url) = asset["browser_download_url"].as_str() {
+                        tracing::info!(asset = asset_name, "Found matching fastfetch release asset");
+                        return Ok((url.to_string(), asset_name.to_string()));
+                    }
+                }
+            }
+        }
+    }
 
     let os_targets: Vec<&str> = match os {
         "linux" => {

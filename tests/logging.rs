@@ -12,7 +12,15 @@ fn run_isoterm_with_args(args: &[&str]) -> (String, String) {
     fs::create_dir_all(&bin_dir).expect("Failed to create test bin dir");
 
     // Pre-create dummy tool files to prevent the app from trying to download them.
-    let dummy_tools = ["fish", "starship", "zoxide", "atuin", "rg", "hx"];
+    let dummy_tools = [
+        "fish",
+        "starship",
+        "zoxide",
+        "atuin",
+        "rg",
+        "hx",
+        "fastfetch",
+    ];
     for tool in &dummy_tools {
         let tool_path = bin_dir.join(tool);
         fs::write(&tool_path, "").expect("Failed to create dummy tool file");

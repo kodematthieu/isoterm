@@ -7,8 +7,8 @@ use crate::{
     cli::Cli,
     error::AppResult,
     provision::{
-        ProvisionContext, atuin::Atuin, fish::Fish, helix::Helix, provision_tool, ripgrep::Ripgrep,
-        starship::Starship, zoxide::Zoxide,
+        atuin::Atuin, fastfetch::Fastfetch, fish::Fish, helix::Helix, provision_tool,
+        ripgrep::Ripgrep, starship::Starship, zoxide::Zoxide, ProvisionContext,
     },
 };
 use anyhow::Context;
@@ -99,7 +99,15 @@ async fn run() -> AppResult<()> {
         tracing::info!("Created symlink overlay for unmanaged configurations");
 
         // --- Overall Progress Bar ---
-        let tools_to_provision = ["fish", "starship", "zoxide", "atuin", "ripgrep", "helix"];
+        let tools_to_provision = [
+            "fish",
+            "starship",
+            "zoxide",
+            "atuin",
+            "ripgrep",
+            "helix",
+            "fastfetch",
+        ];
         let total_steps = (tools_to_provision.len() + 1) as u64; // Tools + config step
 
         let overall_pb = mp.add(ProgressBar::new(total_steps));
@@ -147,6 +155,12 @@ async fn run() -> AppResult<()> {
             )),
             tokio::spawn(provision_tool(
                 Helix,
+                context.clone(),
+                mp.clone(),
+                overall_pb.clone(),
+            )),
+            tokio::spawn(provision_tool(
+                Fastfetch,
                 context.clone(),
                 mp.clone(),
                 overall_pb.clone(),
