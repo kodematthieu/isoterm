@@ -46,4 +46,7 @@ pub enum UserError {
 
     #[error("Your platform ({os}) is not supported for '{name}'.")]
     UnsupportedPlatform { name: String, os: String },
+
+    #[error("Could not find the subdirectory '{subdir_name}' in the archive.")]
+    SubdirectoryNotFoundInArchive { subdir_name: String },
 }

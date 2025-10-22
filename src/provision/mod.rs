@@ -1044,6 +1044,7 @@ pub fn extract_sub_directory<R: Read + Seek>(
         }
         ArchiveType::Zip => {
             let mut archive = ZipArchive::new(&mut reader)?;
+            let mut subdir_found = false;
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i)?;
                 if let Some(enclosed_name) = file.enclosed_name() {
@@ -1056,6 +1057,7 @@ pub fn extract_sub_directory<R: Read + Seek>(
                             let relative_path: PathBuf = sub_path_components.collect();
 
                             if !relative_path.as_os_str().is_empty() {
+                                subdir_found = true;
                                 let outpath = target_dir.join(relative_path);
 
                                 if file.name().ends_with('/') {
@@ -1081,6 +1083,18 @@ pub fn extract_sub_directory<R: Read + Seek>(
                     }
                 }
             }
+
+            if !subdir_found {
+                return Err(UserError::SubdirectoryNotFoundInArchive {
+                    subdir_name: sub_dir_name.to_string(),
+                }
+                .into());
+            }
+            tracing::debug!(
+                "Successfully extracted subdirectory '{}' to '{}'",
+                sub_dir_name,
+                target_dir.display()
+            );
         }
     }
     Ok(())
@@ -1092,6 +1106,7 @@ fn unpack_tar_sub_directory<R: io::Read>(
     target_dir: &Path,
     sub_dir_name: &str,
 ) -> AppResult<()> {
+    let mut subdir_found = false;
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
         let path = entry.path()?;
@@ -1108,6 +1123,7 @@ fn unpack_tar_sub_directory<R: io::Read>(
 
                 // We only care about the *contents* of the subdirectory.
                 if !relative_path.as_os_str().is_empty() {
+                    subdir_found = true; // Mark as found once we extract at least one file/dir
                     let outpath = target_dir.join(relative_path);
 
                     if let Some(p) = outpath.parent() {
@@ -1120,5 +1136,18 @@ fn unpack_tar_sub_directory<R: io::Read>(
             }
         }
     }
+
+    if !subdir_found {
+        return Err(UserError::SubdirectoryNotFoundInArchive {
+            subdir_name: sub_dir_name.to_string(),
+        }
+        .into());
+    }
+
+    tracing::debug!(
+        "Successfully extracted subdirectory '{}' to '{}'",
+        sub_dir_name,
+        target_dir.display()
+    );
     Ok(())
 }
